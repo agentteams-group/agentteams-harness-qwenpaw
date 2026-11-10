@@ -94,6 +94,7 @@ def test_manager_materializes_native_role_prompt_and_preserves_identity(tmp_path
     (role / "HEARTBEAT.md").write_text("Observe resource health.\n")
     worker._prepare_default_plugins()
     workspace = worker.config.default_workspace_dir
+    assert (workspace / "media").is_dir()
     assert (workspace / "MANAGER.md").read_text() == (role / "AGENTS.md").read_text()
     assert (workspace / "SOUL.md").read_text() == "Existing admin identity.\n"
     assert not (worker.config.qwenpaw_working_dir / "plugins/workerflow").exists()
