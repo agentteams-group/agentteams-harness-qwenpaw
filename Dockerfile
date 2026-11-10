@@ -209,4 +209,10 @@ RUN /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-driver-po
 
 WORKDIR /root/agentteams-fs/agents
 
+COPY --from=agentteams-controller \
+    /opt/agentteams/agent/skills/worker-management/scripts/install-worker-skill.sh \
+    /opt/agentteams/agent/skills/worker-management/scripts/safe-extract-worker-skill.py \
+    /opt/agentteams/agent/skills/worker-management/scripts/push-worker-skills.sh \
+    /opt/agentteams/agent/skills/worker-management/scripts/
+
 ENTRYPOINT ["/opt/agentteams/scripts/qwenpaw-worker-entrypoint.sh"]
