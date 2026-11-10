@@ -21,7 +21,7 @@ from pathlib import Path
 QWENPAW = Path(__file__).resolve().parents[1]
 MATRIX_PATCH = QWENPAW / "scripts" / "patch-qwenpaw-matrix-cron-final.py"
 DRIVER_PATCH = QWENPAW / "scripts" / "patch-qwenpaw-driver-policy-reload.py"
-VERSIONS_ENV = QWENPAW.parent / "hack" / "versions.env"
+VERSIONS_ENV = (QWENPAW.parent if (QWENPAW.parent / "hack").is_dir() else QWENPAW / ".deps" / "AgentTeams") / "hack" / "versions.env"
 
 MARKER = "# AgentTeams Matrix needs the closing response to flush its final reply."
 

@@ -3,6 +3,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+AT_ROOT = ROOT.parent if (ROOT.parent / "plugins").is_dir() else ROOT / ".deps" / "AgentTeams"
 
 
 def test_qwenpaw_acp_api_is_compatible() -> None:
@@ -27,8 +28,8 @@ def test_runtime_uses_public_qwenpaw_extension_points_only() -> None:
         for path in (
             ROOT / "src" / "qwenpaw_worker" / "worker.py",
             ROOT / "src" / "qwenpaw_worker" / "update.py",
-            ROOT.parent / "plugins" / "teamharness" / "adapters" / "qwenpaw" / "plugin.py",
-            ROOT.parent / "plugins" / "workerflow" / "adapters" / "qwenpaw" / "plugin.py",
+            AT_ROOT / "plugins" / "teamharness" / "adapters" / "qwenpaw" / "plugin.py",
+            AT_ROOT / "plugins" / "workerflow" / "adapters" / "qwenpaw" / "plugin.py",
         )
     )
     for forbidden in (
