@@ -884,6 +884,9 @@ def test_builtin_plugin_mcp_is_reconciled_through_api(
 ) -> None:
     worker = Worker(_config(tmp_path))
     monkeypatch.setenv("AGENTTEAMS_STORAGE_PREFIX", "agentteams/agentteams-storage")
+    monkeypatch.setenv("AGENTTEAMS_OTEL_ENABLED", "true")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setenv("PYTHONPATH", "/opt/agentteams/scripts/lib/telemetry")
     worker._prepare_env()
     created = {}
     policies = {}
@@ -935,6 +938,9 @@ def test_builtin_plugin_mcp_is_reconciled_through_api(
         "QWENPAW_WORKING_DIR": str(worker.config.qwenpaw_working_dir),
     }
     assert expected_storage_env.items() <= created["teamharness"]["env"].items()
+    assert created["teamharness"]["env"]["AGENTTEAMS_OTEL_ENABLED"] == "true"
+    assert created["teamharness"]["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://collector:4318"
+    assert created["teamharness"]["env"]["PYTHONPATH"] == "/opt/agentteams/scripts/lib/telemetry"
 
 
 @pytest.mark.parametrize("token_source", ["file", "env"])
