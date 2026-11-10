@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 log() {
     echo "[qwenpaw-real-e2e] $*" >&2
@@ -116,7 +116,7 @@ wait_worker_http() {
 
 if [ -z "${AGENTTEAMS_QWENPAW_REAL_MODEL_IMAGE:-}" ] && [ "${AGENTTEAMS_QWENPAW_REAL_MODEL_SKIP_BUILD:-}" != "1" ]; then
     log "building QwenPaw worker image: ${IMAGE}"
-    make -C "${REPO_ROOT}" build-qwenpaw-worker VERSION="${VERSION}"
+    make -C "${REPO_ROOT}" build IMAGE="${IMAGE}" VERSION="${VERSION}"
 else
     log "using existing QwenPaw worker image: ${IMAGE}"
     docker image inspect "${IMAGE}" >/dev/null 2>&1 || fail "image not found: ${IMAGE}"

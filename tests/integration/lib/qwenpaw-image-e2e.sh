@@ -2,7 +2,7 @@
 # Shared helpers for QwenPaw worker image integration tests.
 
 qwenpaw_e2e_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-qwenpaw_e2e_repo_root="$(cd "${qwenpaw_e2e_dir}/../../.." && pwd)"
+qwenpaw_e2e_repo_root="$(cd "${qwenpaw_e2e_dir}/../.." && pwd)"
 
 qwenpaw_e2e_log() {
     echo "[qwenpaw-image-e2e] $*" >&2
@@ -71,7 +71,7 @@ qwenpaw_e2e_build_or_use_image() {
         return
     fi
     qwenpaw_e2e_log "building QwenPaw worker image: ${QWENPAW_E2E_IMAGE}"
-    make -C "${qwenpaw_e2e_repo_root}" build-qwenpaw-worker VERSION="${QWENPAW_E2E_VERSION}"
+    make -C "${qwenpaw_e2e_repo_root}" build IMAGE="${QWENPAW_E2E_IMAGE}" VERSION="${QWENPAW_E2E_VERSION}"
 }
 
 qwenpaw_e2e_create_network() {

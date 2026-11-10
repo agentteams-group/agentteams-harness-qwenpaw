@@ -16,6 +16,9 @@ plugins remain in AgentTeams. The QwenPaw Manager image is still built there.
 and upgrade plugins, Qwen Code Bridge, TeamHarness and WorkerFlow bundles.
 Dependencies are prepared under the ignored `.deps/AgentTeams` directory.
 
+See [the runtime guide](docs/runtime.md) for lifecycle, configuration, plugin
+boundaries and opt-in image integration tests.
+
 ## Build and test
 
 Use Python 3.11–3.13, Ruby, Git, and Docker with BuildKit:
