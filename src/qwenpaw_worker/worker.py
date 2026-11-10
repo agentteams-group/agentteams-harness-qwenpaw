@@ -707,6 +707,7 @@ class Worker:
     def _prepare_default_plugins(self) -> None:
         builtin_root = self._builtin_qwenpaw_plugins_dir()
         if self.config.agent_role == "manager":
+            (self.config.default_workspace_dir / "media").mkdir(parents=True, exist_ok=True)
             # Retire image-owned plugins from the previous Manager launcher.
             for name in ("agentteams-manager-tools", "workerflow"):
                 self._remove_path(self.config.qwenpaw_working_dir / "plugins" / name)
