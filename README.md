@@ -4,6 +4,11 @@ QwenPaw Worker and Team Leader runtime integration for [AgentTeams](https://gith
 Migrated from `qwenpaw/` at AgentTeams commit `67c8e807c4d210537b753f8121710181825bdfac` (Apache-2.0).
 The runtime remains pinned to **QwenPaw 2.2.2.post1**.
 
+The pinned AgentTeams Matrix channel publishes request-bound Dashboard approval
+cards and native approval/rejection/expiry receipts. Updating the channel build
+input is required to include the shared ApprovalService bridge; a Dashboard-only
+update cannot resume or reject a native QwenPaw approval waiter.
+
 ## Scope
 
 `src/qwenpaw_worker/` owns configuration, workspace sync, lifecycle and runtime
