@@ -105,6 +105,8 @@ def _env(d: Path, settle: int = 0) -> dict:
         "AGENTTEAMS_RUNTIME": "k8s",
         "AGENTTEAMS_WORKER_HOME": str(d / "home"),
         "AGENTTEAMS_ENV_LIB": str(ENV_LIB),
+        "AGENTTEAMS_LOG_LIB_DIR": str(ENV_LIB.parent),
+        "AGENTTEAMS_LOG_DIR": str(d / "logs"),
         "AGENTTEAMS_UPGRADE_SCRIPT": str(ORCHESTRATOR),
         "AGENTTEAMS_QWENPAW_VENV": str(d / "venv"),
         "UG_VERSION_CMD": f"cat {d}/version",

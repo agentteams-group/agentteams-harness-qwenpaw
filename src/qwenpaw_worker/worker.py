@@ -25,6 +25,12 @@ from qwenpaw_worker.sync import FileSync, push_loop
 from qwenpaw_worker.update import MemberRuntimeConfig, RuntimeUpdater
 
 logger = logging.getLogger(__name__)
+try:
+    from runtime_observability import event as trace_event
+except ImportError:
+    def trace_event(*args, **kwargs):
+        pass  # Standalone packages can run without container logging.
+
 
 DEFAULT_AGENT_ID = "default"
 DEFAULT_BUILTIN_QWENPAW_PLUGINS_DIR = Path("/opt/agentteams/qwenpaw-builtin/plugins")
@@ -295,6 +301,7 @@ class Worker:
         logger.info("qwenpaw worker stopped component=worker worker=%s", self.config.worker_name)
 
     def _log_worker_stage_begin(self, stage: str, **fields: object) -> float:
+        trace_event("startup.stage", stage=stage)
         started_at = time.monotonic()
         logger.info(
             "startup component=worker stage=%s event=begin worker=%s %s",
@@ -305,6 +312,7 @@ class Worker:
         return started_at
 
     def _log_worker_stage_complete(self, stage: str, started_at: float, **fields: object) -> None:
+        trace_event("startup.stage_complete", stage=stage, duration_ms=_duration_ms(started_at))
         logger.info(
             "startup component=worker stage=%s event=complete worker=%s duration_ms=%s %s",
             stage,
@@ -314,6 +322,7 @@ class Worker:
         )
 
     def _log_worker_stage_failed(self, stage: str, started_at: float, exc: Exception, **fields: object) -> None:
+        trace_event("startup.failed", stage=stage, duration_ms=_duration_ms(started_at), error_type=type(exc).__name__, error=str(exc)[:4096])
         logger.warning(
             "startup component=worker stage=%s event=failed worker=%s duration_ms=%s error_type=%s error_code=%s %s",
             stage,
