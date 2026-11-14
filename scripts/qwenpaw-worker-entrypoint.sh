@@ -1,4 +1,9 @@
 #!/bin/bash
+if [ "${AGENTTEAMS_LOG_CAPTURED:-}" != "1" ]; then
+    exec python3 "${AGENTTEAMS_LOG_LIB_DIR:-/opt/agentteams/scripts/lib}/runtime_supervisor.py" --runtime qwenpaw -- bash "$0" "$@"
+fi
+python3 "${AGENTTEAMS_LOG_LIB_DIR:-/opt/agentteams/scripts/lib}/runtime_observability.py" bootstrap
+
 # qwenpaw-worker-entrypoint.sh - QwenPaw Worker Agent container startup.
 # Reads controller-injected environment variables and launches qwenpaw-worker.
 #
