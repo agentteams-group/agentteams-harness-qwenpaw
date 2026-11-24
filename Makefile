@@ -17,6 +17,7 @@ push: prepare
 	docker buildx build --platform $(PLATFORMS) $(BUILD_ARGS) $(DOCKER_BUILD_ARGS) -t $(IMAGE):$(VERSION) --push .
 test:
 	python3 -m pytest tests -q
+	python3 -m pytest plugins/qwen-code-bridge/tests -q
 smoke:
 	docker run --rm --network none -e AGENTTEAMS_CORE_SOURCE=/at -e PYTHONPATH=/candidate/adapters/matrix:/opt/agentteams/scripts/lib -v "$(CURDIR):/candidate:ro" -v "$(abspath $(AT_SOURCE)):/at:ro" --entrypoint /opt/venv/qwenpaw/bin/python $(IMAGE):$(VERSION) /candidate/tests/native_hitl_smoke.py
 	docker run --rm --network none -v "$(CURDIR)/scripts/smoke_plugin_loader.py:/tmp/smoke_plugin_loader.py:ro" --entrypoint /opt/venv/qwenpaw/bin/python $(IMAGE):$(VERSION) /tmp/smoke_plugin_loader.py --plugin-dir /opt/agentteams/plugins/agentteams-matrix-channel

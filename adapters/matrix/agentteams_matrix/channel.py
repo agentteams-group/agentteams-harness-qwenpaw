@@ -94,6 +94,7 @@ else:
 
 from core.e2ee import (  # noqa: E402
     E2EEMaintainer,
+    E2EE_MAINTENANCE_FAILURE_THRESHOLD,
     crypto_available,
     e2ee_store_path,
 )
@@ -537,6 +538,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             Path(workspace_dir).expanduser() if workspace_dir else None
         )
         self._client: Optional[AsyncClient] = None
+        self._e2ee_maintainer = None
+        self._e2ee_maintenance_client = None
         self._user_id: Optional[str] = None
         self._sync_task: Optional[asyncio.Task] = None
         self._session_receipts = None
@@ -1051,6 +1054,15 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 "status": "unhealthy",
                 "detail": "Matrix client has no access token (not logged in).",
             }
+        maintenance = getattr(self, "_e2ee_maintainer", None)
+        if (maintenance is not None
+                and self._e2ee_maintenance_client is self._client
+                and maintenance.consecutive_failures >= E2EE_MAINTENANCE_FAILURE_THRESHOLD):
+            return {
+                "channel": self.channel,
+                "status": "unhealthy",
+                "detail": f"Matrix E2EE maintenance failed {maintenance.consecutive_failures} consecutive passes: {maintenance.last_error}",
+            }
         return {
             "channel": self.channel,
             "status": "healthy",
@@ -1467,6 +1479,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             self._http_client = None
         if self._client:
             await self._client.close()
+        self._e2ee_maintainer = None
+        self._e2ee_maintenance_client = None
         logger.info("MatrixChannel: stopped component=matrix")
 
     def _clear_access_token(self) -> None:
@@ -1597,8 +1611,14 @@ class AgentTeamsMatrixChannel(BaseChannel):
         the error wording live in the core.
         """
         if not self.encryption or not self._client:
+            self._e2ee_maintainer = None
+            self._e2ee_maintenance_client = None
             return
-        await E2EEMaintainer(self._client).run_once()
+        if (getattr(self, "_e2ee_maintainer", None) is None
+                or self._e2ee_maintenance_client is not self._client):
+            self._e2ee_maintainer = E2EEMaintainer(self._client)
+            self._e2ee_maintenance_client = self._client
+        await self._e2ee_maintainer.run_once()
 
     async def _on_key_verification_event(
         self,
