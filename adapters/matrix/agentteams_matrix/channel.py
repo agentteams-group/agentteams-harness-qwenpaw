@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import html
 import inspect
 import io
@@ -3146,6 +3147,19 @@ class AgentTeamsMatrixChannel(BaseChannel):
         command_text = text
         stripped = self._strip_mention_prefix(text, room)
 
+        answer = content.get("com.agentteams.answer")
+        if isinstance(answer, dict) and answer.get("kind") == "tool_approval":
+            from runtime_hitl import approval_decision
+            from qwenpaw.app.approvals import get_approval_service
+            decision = approval_decision(content, self._user_id)
+            if not decision:
+                return
+            pending = await get_approval_service().get_request(answer["confirmation_id"])
+            if pending is None or answer["context_id"] != hashlib.sha256(
+                    f"{pending.session_id}:{pending.request_id}".encode()).hexdigest():
+                return
+            stripped = f"/approval {'approve' if decision[2] else 'deny'} {pending.request_id}"
+
         # NO_REPLY protocol: the sender explicitly signals "nothing to say".
         # Drop it silently to prevent infinite ping-pong between agents.
         if stripped.strip() == "NO_REPLY":
@@ -4666,6 +4680,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
         to_handle = self.to_handle_from_target(user_id=user_id, session_id=session_id)
         approval = {
             "version": 1, "runtime": "qwenpaw", "request_id": request_id,
+            "reply_format": "com.agentteams.answer",
+            "context_id": hashlib.sha256(f"{pending.session_id}:{request_id}".encode()).hexdigest(),
             "status": "pending", "tool_name": tool_name, "severity": severity,
             "risk_details": pending.result_summary,
             "parameters": json.dumps(
@@ -4688,7 +4704,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             await self.send(to_handle, f"Approval {request_id}: {status}.", {
                 **(channel_meta or {}),
                 "org.agentteams.approval": {
-                    "version": 1, "runtime": "qwenpaw", "request_id": request_id, "status": status,
+                    **approval, "status": status,
                 },
             })
 
