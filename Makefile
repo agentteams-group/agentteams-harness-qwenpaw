@@ -18,6 +18,7 @@ push: prepare
 test:
 	python3 -m pytest tests -q
 smoke:
+	docker run --rm --network none -e AGENTTEAMS_CORE_SOURCE=/at -e PYTHONPATH=/candidate/adapters/matrix:/opt/agentteams/scripts/lib -v "$(CURDIR):/candidate:ro" -v "$(abspath $(AT_SOURCE)):/at:ro" --entrypoint /opt/venv/qwenpaw/bin/python $(IMAGE):$(VERSION) /candidate/tests/native_hitl_smoke.py
 	docker run --rm --network none -v "$(CURDIR)/scripts/smoke_plugin_loader.py:/tmp/smoke_plugin_loader.py:ro" --entrypoint /opt/venv/qwenpaw/bin/python $(IMAGE):$(VERSION) /tmp/smoke_plugin_loader.py --plugin-dir /opt/agentteams/plugins/agentteams-matrix-channel
 	docker run --rm --entrypoint /opt/venv/qwenpaw/bin/python $(IMAGE):$(VERSION) -c 'import qwenpaw_worker; from qwenpaw.plugins.loader import PluginLoader'
 	docker run --rm --network none -v "$(CURDIR)/tests/native_managed_model_smoke.py:/tmp/native_managed_model_smoke.py:ro" --entrypoint /opt/venv/qwenpaw/bin/python $(IMAGE):$(VERSION) /tmp/native_managed_model_smoke.py
