@@ -27,7 +27,7 @@ def test_explicit_workerflow_enable_keeps_plugins_and_warns_about_memory(tmp_pat
     assert "memory pressure" in caplog.text
 
 
-def test_disabled_workerflow_retires_only_its_builtin_and_mcp(tmp_path, monkeypatch):
+def test_disabled_workerflow_preserves_mcp_credentials_for_reenable(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTTEAMS_QWENPAW_WORKERFLOW_ENABLED", "false")
     worker = make_worker(tmp_path, monkeypatch)
     plugin = worker.config.qwenpaw_working_dir / "plugins/workerflow"
@@ -38,7 +38,7 @@ def test_disabled_workerflow_retires_only_its_builtin_and_mcp(tmp_path, monkeypa
     worker.api_client = SimpleNamespace(
         list_mcp=lambda: [{"key": "workerflow"}, {"key": "teamharness"}],
         delete_mcp=deleted.append,
-        update_mcp=lambda name, payload: updated.append(name),
+        update_mcp=lambda name, payload: updated.append((name, payload)),
     )
     worker._prepare_default_plugins()
     worker._configure_builtin_plugin_mcp_clients()
@@ -47,6 +47,12 @@ def test_disabled_workerflow_retires_only_its_builtin_and_mcp(tmp_path, monkeypa
     assert "workerflow" not in prepared
     assert "teamharness" in prepared
     assert "qwen-code-bridge" in prepared
-    assert deleted == ["workerflow"]
-    assert updated == ["teamharness"]
+    assert deleted == []
+    assert updated[0] == ("workerflow", {"enabled": False})
+    assert updated[1][0] == "teamharness"
+    monkeypatch.setenv("AGENTTEAMS_QWENPAW_WORKERFLOW_ENABLED", "true")
+    worker._configure_builtin_plugin_mcp_clients(force=True)
+    assert updated[-1][0] == "workerflow"
+    assert updated[-1][1]["enabled"] is True
+    assert deleted == []
 

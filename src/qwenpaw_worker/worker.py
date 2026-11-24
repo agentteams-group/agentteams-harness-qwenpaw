@@ -1091,7 +1091,8 @@ class Worker:
     def _configure_builtin_plugin_mcp_clients(self, force: bool = False) -> None:
         existing = {str(item.get("key")) for item in self.api_client.list_mcp()}
         if "workerflow" not in self._builtin_plugin_ids() and "workerflow" in existing:
-            self.api_client.delete_mcp("workerflow")
+            # Keep its credential binding so a later opt-in can reactivate it.
+            self.api_client.update_mcp("workerflow", {"enabled": False})
         for plugin_id in self._builtin_plugin_ids():
             plugin_dir = self.config.qwenpaw_working_dir / "plugins" / plugin_id
             asset_dir = plugin_dir / plugin_id
