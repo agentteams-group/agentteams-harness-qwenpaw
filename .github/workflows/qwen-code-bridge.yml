@@ -27,7 +27,7 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
-      - run: python -m pip install pytest pytest-asyncio fastapi httpx pyyaml jsonschema
+      - run: python -m pip install -e . pytest pytest-asyncio 'jsonschema>=4,<5'
       - run: python -m pytest plugins/qwen-code-bridge/tests -q
       - name: Validate against the shared Core plugin schema
         run: |
