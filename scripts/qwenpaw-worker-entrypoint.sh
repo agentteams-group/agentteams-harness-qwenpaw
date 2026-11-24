@@ -77,6 +77,7 @@ export AGENT_WORKSPACE="${QWENPAW_WORKING_DIR}/workspaces/default"
 export QWENPAW_SECRET_DIR="${QWENPAW_SECRET_DIR:-${QWENPAW_WORKING_DIR}.secret}"
 export QWENPAW_RUNNING_IN_CONTAINER=true
 export QWENPAW_LOG_LEVEL="${QWENPAW_LOG_LEVEL:-info}"
+export QWENPAW_ENABLED_CHANNELS="${QWENPAW_ENABLED_CHANNELS-console,agentteams_matrix,dingtalk}"
 
 # LLM stream stall detection (QwenPaw 2.2.0 #7150): first-content and idle
 # timeouts are read from these env vars at process startup (upstream default

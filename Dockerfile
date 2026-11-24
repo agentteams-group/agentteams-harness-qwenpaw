@@ -152,6 +152,9 @@ RUN /opt/venv/qwenpaw/bin/pip install \
         loongsuite-instrumentation-agentscope==0.6.1 \
         opentelemetry-exporter-otlp
 
+COPY scripts/apply-channel-allowlist.py /opt/agentteams/scripts/apply-channel-allowlist.py
+RUN /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/apply-channel-allowlist.py
+
 # Keep Node CLI tooling out of the qwenpaw pip dependency cache key.
 RUN npm config set registry ${NPM_REGISTRY} && \
     npm install -g mcporter skills @nacos-group/cli@1.1.2 && \

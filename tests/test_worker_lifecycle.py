@@ -24,6 +24,8 @@ from qwenpaw_worker.worker import BUILTIN_QWENPAW_PLUGIN_MARKER, Worker
 
 @pytest.fixture(autouse=True)
 def _clear_agent_workspace_env(monkeypatch):
+    # These existing cases exercise the explicitly enabled full profile.
+    monkeypatch.setenv("AGENTTEAMS_QWENPAW_WORKERFLOW_ENABLED", "true")
     monkeypatch.delenv("TMPDIR", raising=False)
     monkeypatch.delenv("AGENTTEAMS_PRIVATE_TMPDIR", raising=False)
     original = os.environ.pop("AGENT_WORKSPACE", None)

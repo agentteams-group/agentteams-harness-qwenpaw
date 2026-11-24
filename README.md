@@ -39,6 +39,18 @@ transient storage sync failure retains the previously loaded runtime copy.
 
 ## Build and test
 
+WorkerFlow is disabled by default for Workers and Team Leaders. AT TeamHarness
+collaboration remains available. To enable Worker-local sub-agent workflows,
+set `AGENTTEAMS_QWENPAW_WORKERFLOW_ENABLED=true` and restart the Worker. Enabling
+it starts additional MCP processes and increases memory pressure. Managers do
+not enable WorkerFlow.
+
+The image loads console, AgentTeams Matrix and DingTalk channels by default.
+`QWENPAW_ENABLED_CHANNELS` selects native channels before their SDKs are imported.
+If you use other native channels, include them in this comma-separated list;
+explicitly set an empty string to restore discovery of all native channels.
+External channel plugins, memory, model/tool execution and tracing are retained.
+
 Use Python 3.11–3.13, Ruby, Git, and Docker with BuildKit:
 
 ```sh

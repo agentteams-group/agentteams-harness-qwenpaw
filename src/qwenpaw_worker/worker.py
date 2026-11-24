@@ -746,7 +746,14 @@ class Worker:
             if not target.exists():
                 shutil.copy2(source, target)
         if self.config.agent_role != "manager":
-            self._prepare_builtin_plugin("workerflow", builtin_root / "workerflow")
+            if "workerflow" in self._builtin_plugin_ids():
+                logger.warning(
+                    "WorkerFlow enabled: your additional MCP and sub-agent workflows can increase memory pressure. "
+                    "Set AGENTTEAMS_QWENPAW_WORKERFLOW_ENABLED=false to disable it."
+                )
+                self._prepare_builtin_plugin("workerflow", builtin_root / "workerflow")
+            else:
+                self._remove_path(self.config.qwenpaw_working_dir / "plugins/workerflow")
             self._prepare_builtin_plugin(
                 "qwen-code-bridge",
                 builtin_root / "qwen-code-bridge",
@@ -1083,8 +1090,9 @@ class Worker:
 
     def _configure_builtin_plugin_mcp_clients(self, force: bool = False) -> None:
         existing = {str(item.get("key")) for item in self.api_client.list_mcp()}
-        if self.config.agent_role == "manager" and "workerflow" in existing:
-            self.api_client.delete_mcp("workerflow")
+        if "workerflow" not in self._builtin_plugin_ids() and "workerflow" in existing:
+            # Keep its credential binding so a later opt-in can reactivate it.
+            self.api_client.update_mcp("workerflow", {"enabled": False})
         for plugin_id in self._builtin_plugin_ids():
             plugin_dir = self.config.qwenpaw_working_dir / "plugins" / plugin_id
             asset_dir = plugin_dir / plugin_id
@@ -1168,7 +1176,10 @@ class Worker:
             self.api_client.put_mcp_policy(plugin_id, allow_policy)
 
     def _builtin_plugin_ids(self) -> tuple[str, ...]:
-        return ("teamharness",) if self.config.agent_role == "manager" else ("teamharness", "workerflow")
+        enabled = os.getenv("AGENTTEAMS_QWENPAW_WORKERFLOW_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+        if self.config.agent_role == "manager" or not enabled:
+            return ("teamharness",)
+        return ("teamharness", "workerflow")
 
     async def _heartbeat_probe_loop(self) -> None:
         await run_worker_heartbeat_loop(
