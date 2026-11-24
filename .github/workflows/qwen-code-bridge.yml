@@ -1,0 +1,51 @@
+name: Qwen Code bridge
+on:
+  pull_request:
+    paths: ['plugins/qwen-code-bridge/**', '.github/workflows/qwen-code-bridge.yml']
+  push:
+    branches: [main]
+    tags: ['qwen-code-bridge-v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read shared Core dependency
+        id: core
+        run: echo "ref=$(sed -n 's/^AT_REF=//p' versions.env)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: agentscope-ai/AgentTeams
+          ref: ${{ steps.core.outputs.ref }}
+          path: .deps/AgentTeams
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - run: python -m pip install -e . pytest pytest-asyncio 'jsonschema>=4,<5'
+      - run: python -m pytest plugins/qwen-code-bridge/tests -q
+      - name: Validate against the shared Core plugin schema
+        run: |
+          ln -s "$GITHUB_WORKSPACE/.deps/AgentTeams/plugins/schemas" plugins/schemas
+          ruby .deps/AgentTeams/plugins/scripts/validate-plugin.rb plugins/qwen-code-bridge/plugin.yaml
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          bash .deps/AgentTeams/plugins/scripts/check-release-tag.sh \
+            --tag "$TAG_NAME" --yaml plugins/qwen-code-bridge/plugin.yaml \
+            --json plugins/qwen-code-bridge/plugin.json --expect-name qwen-code-bridge
+      - run: sh plugins/qwen-code-bridge/scripts/package.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qwen-code-bridge
+          path: |
+            dist/qwen-code-bridge-*.zip
+            dist/sha256sums.txt
+            dist/release-manifest.json

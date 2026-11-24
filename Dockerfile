@@ -173,7 +173,7 @@ COPY --from=agentteams dist/adapters/qwenpaw/workerflow-qwenpaw.zip /opt/agentte
 COPY adapters/matrix/ /opt/agentteams/plugins/agentteams-matrix-channel/
 COPY --from=agentteams plugins/agentteams-matrix/core/ /opt/agentteams/plugins/agentteams-matrix-channel/core/
 COPY --from=agentteams plugins/agentteams-upgrade/ /opt/agentteams/plugins/agentteams-upgrade/
-COPY --from=agentteams plugins/qwen-code-bridge/ /opt/agentteams/plugins/qwen-code-bridge/
+COPY plugins/qwen-code-bridge/ /opt/agentteams/plugins/qwen-code-bridge/
 COPY scripts/install-builtin-qwenpaw-plugins.py /tmp/install-builtin-qwenpaw-plugins.py
 RUN /opt/venv/qwenpaw/bin/python /tmp/install-builtin-qwenpaw-plugins.py \
         --working-dir /opt/agentteams/qwenpaw-builtin \

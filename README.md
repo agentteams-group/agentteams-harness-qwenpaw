@@ -73,3 +73,15 @@ AgentTeams consumes this repository as a pinned `qwenpaw/` submodule, passing
 its root as the `agentteams` build context and `shared/lib` as `shared`.
 The existing environment variables and persisted `.qwenpaw` workspace contract
 are unchanged.
+# Runtime-owned plugins
+
+The [Qwen Code bridge](plugins/qwen-code-bridge/README.md) is maintained and
+packaged in this Harness repository. Its plugin ID, installation directory,
+configuration keys and persisted state paths are unchanged. Existing installs
+can use the same plugin upgrade API with a ZIP built here; moving the source
+does not require moving credential files or resetting CLI sessions. The managed
+image continues to install it under `/opt/agentteams/plugins/qwen-code-bridge`.
+
+Matrix key maintenance retains its failure counter for the lifetime of each
+client. Five consecutive failures make channel health unhealthy; a successful
+pass restores healthy status without stopping recovery.
