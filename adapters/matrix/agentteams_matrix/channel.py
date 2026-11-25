@@ -4020,6 +4020,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             )
             return True
         thread_meta = self._with_thread_relation_meta(meta_dict, thread_root)
+        thread_meta["org.agentteams.progress_only"] = True
         await self.send_content_parts(room_id, parts, thread_meta)
         return True
 
@@ -4074,6 +4075,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         content: dict[str, Any] = {
             "msgtype": "m.notice",
             "body": "处理中...",
+            "org.agentteams.progress_only": True,
         }
         try:
             resp = await self._room_send_with_retry(
@@ -4110,6 +4112,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             return None
         content: dict[str, Any] = {
             "msgtype": "m.notice",
+            "org.agentteams.progress_only": True,
             "body": text,
             "format": "org.matrix.custom.html",
             "formatted_body": _md_to_html(text),
@@ -4390,7 +4393,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 explicit_user_ids=explicit_ids,
             )
         self._apply_thread_relation(content, meta_dict)
-        if meta_dict.get("teamharness_matrix_coordination"):
+        if msgtype == "m.notice" or meta_dict.get("org.agentteams.progress_only") or meta_dict.get("teamharness_matrix_coordination"):
             content["org.agentteams.progress_only"] = True
             content["m.mentions"] = {"user_ids": []}
         approval = meta_dict.get("org.agentteams.approval")
