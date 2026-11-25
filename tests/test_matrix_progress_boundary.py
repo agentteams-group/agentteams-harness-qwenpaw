@@ -85,3 +85,19 @@ def test_internal_coordination_does_not_advertise_private_conversation_controls(
         assert [part async for part in channel._stream_matrix_payload(payload)] == ['native tool progress']
     asyncio.run(run())
     channel._publish_direct_execution.assert_not_awaited()
+
+
+def test_planning_control_uses_source_identity_without_a_chat_placeholder():
+    from unittest.mock import Mock
+
+    channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+    channel._enqueue = Mock()
+    channel._room_send_with_retry = AsyncMock()
+    channel._client = object()
+    meta = {'room_id': '!task:test', 'event_id': '$planning',
+            'teamharness_matrix_coordination': True,
+            'teamharness_coordination': {'kind': 'handoff'}}
+    channel._enqueue_matrix_input({'meta': meta}, None)
+    assert meta['org.agentteams.run_id'] == 'qwenpaw:message:!task:test:$planning'
+    asyncio.run(channel._ensure_thread_root('!task:test', meta))
+    channel._room_send_with_retry.assert_not_awaited()

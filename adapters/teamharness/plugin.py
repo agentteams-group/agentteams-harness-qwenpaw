@@ -308,8 +308,25 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                 fact += receipts.creation_coverage_context(_creation_sources.get() or [], self._registered_inputs)
             extra = []
             if not creation_source and action == "submit" and _native_actor.get():
-                extra = _native_module().dispatched_receipts(result, _native_actor.get(), _controller_json,
-                                                             wait_for_send=True)
+                meta = _request_meta(_ctx.request) if _ctx is not None else {}
+                if meta.get("task_execution") and _ctx.session_id:
+                    # Controller publishes only after the business result reaches Matrix.
+                    # Save the outgoing identities inside this native session before it closes.
+                    task = result["task"]
+                    fields = ("eventId", "taskId", "status")
+                    assignments = [{k: row[k] for k in fields if k in row}
+                                   for row in result.get("assignments", []) if row.get("status") == "queued" and row.get("eventId")]
+                    notice = result.get("notification") or {}
+                    outgoing = {"task": {k: task[k] for k in ("id", "mainTaskId", "submissionId") if k in task},
+                                "assignments": assignments}
+                    if notice.get("status") == "queued" and notice.get("eventId"):
+                        outgoing["notification"] = {"status": "queued", "eventId": notice["eventId"]}
+                    if assignments or "notification" in outgoing:
+                        _ctx.agent.state.middle_context["teamharness.outgoing"] = {
+                            "session": _ctx.session_id, "room": meta["room_id"], "result": outgoing}
+                else:
+                    extra = _native_module().dispatched_receipts(result, _native_actor.get(), _controller_json,
+                                                                 wait_for_send=True)
             outcome = {"phaseComplete": True, "result": result, "receiptId": receipt[0], "fact": fact,
                        "extraReceipts": extra}
             projected = _native_module().model_result(outcome)
@@ -582,6 +599,13 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                     run = _request_meta(_ctx.request).get("org.agentteams.run_id")
                     if run:
                         args["_nativeRunId"] = run
+                if args.get("action") == "plan" and args.get("taskId") in _planning_tasks.get() and (
+                    not isinstance(args.get("overview"), str) or not args["overview"].strip()
+                ):
+                    from agentscope.tool import ToolResponse
+                    yield ToolResponse(state="error", content=[{"type": "text", "text":
+                        "请在 overview 中填写任务目标、要求、验收标准、节点分工和最终产物，再提交规划。"}])
+                    return
                 review = _review_task.get()
                 if review and args.get("action") in {"accept", "reject"}:
                     try:
@@ -933,6 +957,9 @@ async def _prepare_public_task_event(ctx: Any, event: dict) -> None:
                 ctx.extras[key] = variable.set(prepared[field])
         ctx.inject_context(prepared["fact"] + "\n" + json.dumps(common.model_context(prepared["context"]), ensure_ascii=False), source="teamharness_public_task_prepared")
     _load_phase_skill(ctx, "task-management")
+    if kind == "handoff":
+        ctx.inject_context("规划时在 task plan 的 overview 中写明任务目标、要求、验收标准、节点分工和最终产物。"
+                           "系统保存规划后先发布这条概要，再派发第一个节点。", source="teamharness_task_overview")
     if kind == "handoff" and "Skill" in names:
         ctx.inject_context(
             "This planning session does not inherit skills read in the intake conversation. "

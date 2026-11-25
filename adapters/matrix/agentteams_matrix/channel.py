@@ -444,6 +444,12 @@ def _run_id(room, event=None, task=None):
     return f"qwenpaw:message:{room}:{event}"
 
 
+def _is_task_coordination(meta):
+    return meta.get("teamharness_matrix_coordination") and (
+        meta.get("teamharness_coordination") or {}
+    ).get("kind") in {"handoff", "task_submitted", "main_task_ready"}
+
+
 def _is_assistant_turn(meta):
     return isinstance(meta, dict) and (meta.get("teamharness_coordination") or {}).get("kind") == "assistant_digest"
 
@@ -792,6 +798,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
     async def _stream_recovered_task(self, payload):
         from task_recovery import RecoveryConflict, RecoveryUnavailable
         identity = payload["meta"]["task_execution"]
+        interrupted = True
         try:
             await asyncio.to_thread(self._task_execution.verify, identity)
             producer = asyncio.current_task()
@@ -833,6 +840,9 @@ class AgentTeamsMatrixChannel(BaseChannel):
                     await self._task_execution.remember(identity, payload["meta"]["task_session_id"])
         finally:
             self._task_execution.native_closed(identity)
+            if self._session_receipts and not interrupted:
+                self._session_receipts.handoff_sessions.add((payload["meta"]["room_id"], payload["meta"]["task_session_id"]))
+                self._session_receipts.wakeup.set()
 
     async def _recover_owned_tasks(self):
         from task_recovery import RecoveryConflict, RecoveryUnavailable
@@ -875,10 +885,11 @@ class AgentTeamsMatrixChannel(BaseChannel):
         return response.event_id
 
     def _enqueue_matrix_input(self, payload, turn):
+        meta = payload["meta"]
+        if turn or _is_task_coordination(meta):
+            meta["org.agentteams.run_id"] = _run_id(meta["room_id"], meta["event_id"])
         if turn:
             identity = turn["identity"]
-            meta = payload["meta"]
-            meta["org.agentteams.run_id"] = _run_id(meta["room_id"], meta["event_id"])
             meta.update(message_execution=identity, message_session_id=turn["session_id"])
             if turn.get("history"):
                 payload["content_parts"].insert(0, TextContent(type=ContentType.TEXT, text=turn["history"]))
@@ -4087,7 +4098,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         send_meta: Dict[str, Any],
     ) -> None:
         """Use the durable execution identity for managed work and a thread for other turns."""
-        if send_meta.get("task_execution") or send_meta.get("message_execution"):
+        if send_meta.get("task_execution") or send_meta.get("message_execution") or _is_task_coordination(send_meta):
             send_meta["org.agentteams.run_id"] = _run_id(to_handle, send_meta.get("event_id"), send_meta.get("task_execution"))
             return
         if send_meta.get(_MATRIX_OWN_THREAD_ROOT_KEY):
@@ -4811,7 +4822,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 return
             send_meta.pop(_MATRIX_PENDING_FINAL_MESSAGE_KEY, None)
             send_meta.pop(_MATRIX_STREAMING_FINAL_TEXT_KEY, None)
-        if self._is_reasoning_message(message_type) and (not self.show_thinking or send_meta.get("teamharness_matrix_coordination")):
+        if self._is_reasoning_message(message_type) and not self.show_thinking:
             # show_thinking disabled: reasoning is never rendered to the room.
             return
         if self._is_tool_call_message(message_type) and not self.show_tool_calls:
@@ -4934,7 +4945,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             return
         text = (accumulated_text or "").strip()
         if stream_type == "reasoning":
-            if self.show_thinking and not send_meta.get("teamharness_matrix_coordination"):
+            if self.show_thinking and not _is_assistant_turn(send_meta):
                 await self._ensure_thread_root(to_handle, send_meta)
                 if not text:
                     text = self._text_from_message_event(event)
@@ -5229,7 +5240,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             await self._send_typing(to_handle, False)
             return
         display = send_meta.pop("_matrix_native_progress", None)
-        if display is not None and not (send_meta.get("message_execution") or send_meta.get("task_execution")):
+        if display is not None and not (send_meta.get("message_execution") or send_meta.get("task_execution") or _is_task_coordination(send_meta)):
             try:
                 await display.finish()
             except Exception:

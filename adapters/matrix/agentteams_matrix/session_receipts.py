@@ -24,6 +24,7 @@ class SessionReceipts:
         self.channel = channel
         self.session_dir = session_dir
         self.pending = {}
+        self.handoff_sessions = set()
         self.flush_lock = asyncio.Lock()
         self.wakeup = asyncio.Event()
         self.task = None
@@ -37,7 +38,11 @@ class SessionReceipts:
         for path in self.session_dir.rglob("*.json"):
             try:
                 data = json.loads(await asyncio.to_thread(path.read_text))
-                pending = data.get("agent", {}).get("state", {}).get("middle_context", {}).get(PENDING_KEY, [])
+                middle = data.get("agent", {}).get("state", {}).get("middle_context", {})
+                outgoing = middle.get("teamharness.outgoing")
+                if outgoing:
+                    self.handoff_sessions.add((outgoing["room"], outgoing["session"]))
+                pending = middle.get(PENDING_KEY, [])
                 for entry in pending:
                     await self.submit(entry["room_id"], [entry["event_id"]])
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -70,11 +75,60 @@ class SessionReceipts:
     async def flush(self):
         async with self.flush_lock:
             await self._flush()
+            for room, session in list(self.handoff_sessions):
+                try:
+                    if await self.flush_handoff(room, session):
+                        self.handoff_sessions.discard((room, session))
+                except Exception:
+                    logger.warning("Native task handoff persistence deferred for %s", session, exc_info=True)
             if self._manager_outbox and self.channel._client:
                 from agentteams_receipts import matrix_request
 
                 request = matrix_request(self.channel.homeserver, self.channel._client.access_token)
                 await asyncio.to_thread(self._manager_outbox.flush, request)
+
+    async def confirmed_handoffs(self, outgoing):
+        import sys
+        common = Path(os.getenv("AGENTTEAMS_PLUGIN_DIR", "/opt/agentteams/plugins/teamharness")) / "mcp/common"
+        if str(common) not in sys.path:
+            sys.path.insert(0, str(common))
+        import task_native
+        return await asyncio.to_thread(task_native.dispatched_receipts, outgoing, self.channel.matrix_user_id,
+                                       task_native.controller_json)
+
+    async def flush_handoff(self, room, session):
+        from agentscope.message import Msg, TextBlock
+        from agentscope.state import AgentState
+
+        store = self.channel._workspace.session
+        scope = {"user_id": room, "channel": self.channel.channel}
+        doc = await store.get_session_state_dict(session, allow_not_exist=False, **scope)
+        raw = doc["agent"]["state"]
+        pending = raw.get("middle_context", {}).get("teamharness.outgoing")
+        if not pending:
+            return True
+        if (pending["room"], pending["session"]) != (room, session):
+            raise ValueError("Outgoing task receipt belongs to another native session")
+        outgoing = pending["result"]
+        confirmed = await self.confirmed_handoffs(outgoing)
+        if not confirmed:
+            return False
+        state = AgentState.model_validate(raw)
+        sent = set()
+        for receipt in confirmed:
+            sent.add(json.loads(receipt["receiptId"])[1])
+            state.context.append(Msg(name="Task", role="system", content=[TextBlock(text=receipt["fact"])]))
+        remaining = dict(outgoing)
+        remaining["assignments"] = [row for row in outgoing["assignments"] if row["eventId"] not in sent]
+        if (remaining.get("notification") or {}).get("eventId") in sent:
+            remaining.pop("notification")
+        done = not (remaining["assignments"] or remaining.get("notification"))
+        if done:
+            del state.middle_context["teamharness.outgoing"]
+        else:
+            state.middle_context["teamharness.outgoing"] = {**pending, "result": remaining}
+        await store.update_session_state(session, "agent.state", state.model_dump(mode="json"), **scope)
+        return done
 
     async def _flush(self):
         for key in list(self.pending):
