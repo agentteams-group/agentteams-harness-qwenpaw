@@ -25,12 +25,16 @@ from qwenpaw_message_execution import canonical_registration
 from task_recovery import Recovery, RecoveryConflict
 
 
-def middleware(ctx):
+def middleware_module():
     path = HARNESS / 'adapters/matrix/agentteams_matrix/session_receipts.py'
     spec = importlib.util.spec_from_file_location('_qwen_native_journal', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.SessionReceiptMiddleware(ctx)
+    return module
+
+
+def middleware(ctx):
+    return middleware_module().SessionReceiptMiddleware(ctx)
 
 
 @pytest.mark.parametrize('outcome', ['success', 'timeout', 'late_timeout', 'error'])
@@ -297,3 +301,39 @@ def test_real_agent_awaits_model_admission_before_provider(scope, blocked):
             await agent.reply(inputs)
             assert model.calls == 1
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('module', ['browser_sdk', 'qwenpaw.agents.skills.browser_sdk'])
+def test_unavailable_browser_sdk_import_is_rejected_before_tool_admission(module):
+    from qwenpaw.agents.tools.browser import browser
+    from qwenpaw.governance import PolicyGuardedTool
+    tool = PolicyGuardedTool(browser, name='browser')
+    agent = SimpleNamespace(toolkit=SimpleNamespace(get_tool=AsyncMock(return_value=tool)))
+    ctx = SimpleNamespace(request=SimpleNamespace(channel_meta={}), extras={})
+    hook = middleware(ctx)
+    hook._message_turn = AsyncMock(return_value=(object(), {'identity': {'event_key': 'e'}, 'lock': asyncio.Lock()}))
+    code = f'print("would run")\nfrom {module} import Browser\nb = await Browser.connect()'
+    call = ToolCallBlock(id='browser-call', name='browser', input=json.dumps({'code': code}))
+    async def native(**kwargs):
+        pytest.fail('invalid browser input reached the native kernel')
+        yield
+    async def scenario():
+        result, = [x async for x in hook.on_acting(agent, {'tool_call': call}, native)]
+        assert result.state == 'error' and 'await Browser.connect()' in str(result.content)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(('native_browser', 'code'), [
+    (True, 'b = await Browser.connect()'),
+    (True, 'note = "from browser_sdk import Browser"'),
+    (False, 'from browser_sdk import Browser'),
+])
+def test_other_browser_calls_retain_native_admission(native_browser, code):
+    from qwenpaw.agents.tools.browser import browser
+    from qwenpaw.governance import PolicyGuardedTool
+    async def custom_browser(code):
+        return code
+    tool = PolicyGuardedTool(browser if native_browser else custom_browser, name='browser')
+    agent = SimpleNamespace(toolkit=SimpleNamespace(get_tool=AsyncMock(return_value=tool)))
+    call = ToolCallBlock(id='b', name='browser', input=json.dumps({'code': code}))
+    assert not asyncio.run(middleware_module().imports_unavailable_browser_sdk(agent, call))

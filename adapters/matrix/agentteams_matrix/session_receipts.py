@@ -1,6 +1,7 @@
 """Exact Matrix acknowledgements at the durable session-input boundary."""
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
@@ -15,6 +16,32 @@ from agentscope.middleware import MiddlewareBase
 logger = logging.getLogger(__name__)
 RECEIPT_TYPE = "com.agentteams.session_receipt"
 PENDING_KEY = "agentteams_session_receipts"
+
+
+async def imports_unavailable_browser_sdk(agent, call):
+    if call.name != "browser":
+        return False
+    arguments = json.loads(call.input) if isinstance(call.input, str) else call.input
+    code = arguments.get("code") if isinstance(arguments, dict) else None
+    if not isinstance(code, str):
+        return False
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    unavailable = {"browser_sdk", "qwenpaw.agents.skills.browser_sdk"}
+    if not any((isinstance(node, ast.ImportFrom) and not node.level and node.module in unavailable) or
+               (isinstance(node, ast.Import) and any(alias.name in unavailable for alias in node.names))
+               for node in tree.body):
+        return False
+    from agentscope.tool import FunctionTool
+    from qwenpaw.agents.tools.browser import browser
+    from qwenpaw.governance.tool_adapter import _policy_tool_call
+
+    toolkit = getattr(agent, "toolkit", None)
+    tool = await toolkit.get_tool(call.name) if toolkit else None
+    return (isinstance(tool, FunctionTool) and type(tool).call is FunctionTool.call
+            and type(tool).__call__ in {FunctionTool.__call__, _policy_tool_call} and tool._func is browser)
 
 
 class SessionReceipts:
@@ -220,6 +247,12 @@ class SessionReceiptMiddleware(MiddlewareBase):
                 # Decline before opening a journal entry or invoking any child.
                 yield ToolResponse(state="error", content=[TextBlock(
                     text="Batch execution is unavailable for this managed turn. Call each required tool directly.")])
+                return
+            if await imports_unavailable_browser_sdk(agent, call):
+                from agentscope.message import TextBlock
+                from agentscope.tool import ToolResponse
+                yield ToolResponse(state="error", content=[TextBlock(
+                    text="浏览器脚本尚未执行。请删除 Browser SDK 的 import 语句，直接使用 await Browser.connect()。")])
                 return
             from qwenpaw_message_execution import guarded_tool, read_only_registration
             binding = self.ctx.extras.get('agentteams_task_registration')
