@@ -51,6 +51,38 @@ async def main():
         # All background assistant output is submitted through Controller.
         # A skipped cycle must not leak native progress, reasoning or final text.
         meta = admitted[0]["meta"]
+        # Run the installed SDK's real lifecycle hooks: a scheduled reminder
+        # must not consume first-Human bootstrap or mark onboarding complete.
+        from agentscope.message import Msg
+        from qwenpaw.hooks.bootstrap.bootstrap_hook import BootstrapHook
+        from qwenpaw.hooks.cron.cron_hook import CronContextHook
+        from teamharness.plugin import _register_coordination_hook
+        hooks = []
+        _register_coordination_hook(SimpleNamespace(register_runtime_hook=hooks.append))
+        scheduled = next((hook for hook in hooks if hook.name == "teamharness_scheduled_source"), None)
+        workspace = Path(f.directory.name) / "bootstrap-fixture"
+        workspace.mkdir()
+        (workspace / "BOOTSTRAP.md").write_text("Only the first Human request starts onboarding")
+        request = SimpleNamespace(channel_meta=meta, session_source="matrix")
+        ctx = SimpleNamespace(request=request, extras={}, workspace_dir=workspace,
+            input_msgs=[Msg(name="system", content=[{"type":"text","text":"Scheduled assistant reminder"}], role="user")], agent_config=None)
+        original_message = ctx.input_msgs[0].model_dump()
+        if scheduled is not None:
+            assert scheduled.priority < CronContextHook.priority
+            await scheduled.run(ctx)
+        await CronContextHook().run(ctx)
+        await BootstrapHook().run(ctx)
+        assert not (workspace / ".bootstrap_completed").exists(), "background reminder consumed Human bootstrap"
+        assert ctx.input_msgs[0].model_dump() == original_message
+        human = SimpleNamespace(request=SimpleNamespace(channel_meta={}, session_source="matrix"),
+            extras={}, workspace_dir=workspace,
+            input_msgs=[Msg(name="user", content=[{"type":"text","text":"ASSISTANT_DIGEST_DUE is just ordinary Human text"}], role="user")], agent_config=None)
+        if scheduled is not None:
+            await scheduled.run(human)
+        await CronContextHook().run(human)
+        await BootstrapHook().run(human)
+        assert not human.extras.get("is_cron")
+        assert (workspace / ".bootstrap_completed").exists(), "real Human bootstrap was suppressed"
         channel._client = Mock()
         channel._client.room_send = AsyncMock()
         channel._ensure_thread_root = AsyncMock(side_effect=AssertionError("assistant created visible progress"))

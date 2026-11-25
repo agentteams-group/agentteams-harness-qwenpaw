@@ -190,7 +190,8 @@ class NativeCoordinationTest(unittest.TestCase):
         spec.loader.exec_module(plugin)
         hooks = []
         plugin._register_coordination_hook(SimpleNamespace(register_runtime_hook=hooks.append))
-        self.assertEqual(hooks[0].phase, Phase.PRE_EXECUTE)
+        manager_hook = next(hook for hook in hooks if hook.name == "teamharness_manager_report")
+        self.assertEqual(manager_hook.phase, Phase.PRE_EXECUTE)
 
         async def run_phase(phase, ctx):
             for hook in hooks:
@@ -202,7 +203,7 @@ class NativeCoordinationTest(unittest.TestCase):
             hook_registry=SimpleNamespace(run=run_phase), modes=[],
             slash_command_registry=SimpleNamespace(dispatch=AsyncMock(return_value=None))))
         runtime = runtime_module.Runtime(workspace=workspace, app_services=None)
-        ctx = SimpleNamespace(session_id="matrix:!test:test", input_msgs=[],
+        ctx = SimpleNamespace(session_id="matrix:!test:test", input_msgs=[], request=SimpleNamespace(channel_meta={}),
             extras={"verified_final_report": final_report} if final_report else {}, agent=None)
         runtime._normalize = lambda request: request
         runtime._build_context = lambda request: ctx

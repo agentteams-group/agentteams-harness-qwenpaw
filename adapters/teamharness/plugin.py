@@ -1243,6 +1243,19 @@ def _register_coordination_hook(api: Any) -> None:
     except ImportError:
         return
 
+    class ScheduledSource(HookBase):
+        phase = Phase.PRE_DISPATCH
+        name = "teamharness_scheduled_source"
+        priority = 0
+
+        async def run(self, ctx: Any) -> Any:
+            control = _request_meta(ctx.request).get("teamharness_coordination") or {}
+            if control.get("kind") == "assistant_digest":
+                # Use the SDK's scheduled lifecycle before its cron/bootstrap
+                # hooks. A background check must not consume Human onboarding.
+                ctx.request.session_source = "cron"
+            return HookResult()
+
     class ManagerReport(HookBase):
         phase = Phase.PRE_EXECUTE
         name = "teamharness_manager_report"
@@ -1320,6 +1333,7 @@ def _register_coordination_hook(api: Any) -> None:
                     _requester_route.reset(token)
             return HookResult()
 
+    api.register_runtime_hook(ScheduledSource())
     api.register_runtime_hook(ManagerReport())
     api.register_runtime_hook(CoordinationExit())
 
