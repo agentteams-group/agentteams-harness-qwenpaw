@@ -63,6 +63,13 @@ This policy does not disable the ToolGuard or grant all shell commands.
   copy package `skills/` to workspace skills, and refresh/enable them through
   the public Skill API.
 
+  A Task-room planning turn has its own native session. It retains the native
+  read-only `Skill` viewer and loads applicable domain instructions before
+  planning; reading a Skill in the intake DM does not carry its body into this
+  session. The coordination tool restriction still excludes Shell, file writes,
+  legacy flows and resource management. Task state changes use the native Task
+  tool. Skills already loaded in the current session need no duplicate read.
+
 `desired.mcpServers` and package `mcp.json` are intentionally separate:
 
 - `desired.mcpServers` is controller-projected runtime config and configures
