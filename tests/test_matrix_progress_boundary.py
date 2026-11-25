@@ -29,3 +29,16 @@ def test_tool_thinking_and_placeholder_are_progress_but_business_text_is_not():
         assert 'org.agentteams.progress_only' not in final
         assert meta[_MATRIX_OWN_THREAD_ROOT_KEY] == '$progress'
     asyncio.run(run())
+
+
+def test_internal_handoff_notice_reaches_the_verified_ingress():
+    channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+    channel._on_room_event = AsyncMock()
+    event = SimpleNamespace(source={'content': {'org.agentteams.coordination': {
+        'channel_meta': {'teamharness_coordination': {'kind': 'handoff'}}}}})
+    room = SimpleNamespace(room_id='!task:test')
+    asyncio.run(channel._on_coordination_notice(room, event))
+    channel._on_room_event.assert_awaited_once_with(room, event)
+    event.source['content']['org.agentteams.coordination']['channel_meta']['teamharness_coordination']['kind'] = 'forged'
+    asyncio.run(channel._on_coordination_notice(room, event))
+    channel._on_room_event.assert_awaited_once()

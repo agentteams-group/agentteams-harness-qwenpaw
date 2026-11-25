@@ -67,9 +67,14 @@ def test_native_terminal_fact_is_saved_but_only_business_reply_is_visible(intake
                 'native_id': 'matrix:$actual-send'}
         try:
             with patch.object(plugin, '_controller_json', return_value=sent):
-                reply = await agent.reply(Msg(name='Human', role='user', content=[TextBlock(text='Own requirement')]))
-            visible = ''.join(block.get('text', '') if isinstance(block, dict) else block.text for block in reply.content)
+                events = [event async for event in agent.reply_stream(Msg(name='Human', role='user', content=[TextBlock(text='Own requirement')]))]
+                from agentscope.event import TextBlockEndEvent, ReplyEndEvent
+                final_blocks = [event for event in events if isinstance(event, TextBlockEndEvent)]
+                assert len(final_blocks) == 1
+                assert next(event for event in events if isinstance(event, ReplyEndEvent)).finished_reason == 'completed'
+            visible = final_blocks[0].text
             assert ('已受理' in visible and '查看任务' in visible) if intake else visible == 'NO_REPLY'
+            assert final_blocks[0].text == visible
             assert model.calls == 1
             native = json.dumps(await model.formatter.format(agent.state.context), ensure_ascii=False)
             assert 'Task system receipt' in native

@@ -2976,7 +2976,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         control = content.get("org.agentteams.coordination")
         meta = control.get("channel_meta", {}) if isinstance(control, dict) else {}
         assignment = meta.get("teamharness_coordination", {}) if isinstance(meta, dict) else {}
-        if isinstance(assignment, dict) and assignment.get("kind") == "assistant_digest":
+        if isinstance(assignment, dict) and assignment.get("kind") in {"assistant_digest", "handoff"}:
             await self._on_room_event(room, event)
 
     async def _on_room_event(
@@ -3048,7 +3048,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         teamharness_self_trigger = None
         if sender_id == self._user_id:
             teamharness_self_trigger = self._teamharness_self_trigger(room_id, event)
-            if control is not None and assignment.get("kind") in {"assistant_digest", "task_assigned", "task_submitted", "project_ready", "main_task_ready"}:
+            if control is not None and assignment.get("kind") in {"assistant_digest", "handoff", "task_assigned", "task_submitted", "project_ready", "main_task_ready"}:
                 # The runtime hook verifies self-addressed execution/closure
                 # against the Controller receipt and current task before inference.
                 teamharness_self_trigger = {"type": "project_ready", "kind": "coordination"}
