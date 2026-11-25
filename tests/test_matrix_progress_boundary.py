@@ -42,3 +42,31 @@ def test_internal_handoff_notice_reaches_the_verified_ingress():
     event.source['content']['org.agentteams.coordination']['channel_meta']['teamharness_coordination']['kind'] = 'forged'
     asyncio.run(channel._on_coordination_notice(room, event))
     channel._on_room_event.assert_awaited_once()
+
+
+def test_handoff_with_main_task_does_not_duplicate_its_session_suffix(monkeypatch):
+    import task_coordination
+    channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+    channel._user_id = '@leader:test'
+    channel._task_execution = object()
+    channel._teamharness_self_trigger = lambda *args: None
+    channel._is_dm_room = AsyncMock(side_effect=RuntimeError('verified handoff admitted'))
+    event_id = 'a' * 32
+    meta = {'sender_id': '@leader:test', 'agent_matrix_user_id': '@leader:test',
+            'room_id': '!task:test', 'teamharness_coordination': {
+                'id': event_id, 'kind': 'handoff', 'main_task_id': 'main'}}
+    control = {'session_id': 'coordination-handoff:' + event_id, 'channel_meta': meta,
+               'input': [{'content': [{'text': 'Plan the admitted main Task'}]}]}
+    monkeypatch.setattr(task_coordination, 'notification', lambda *args, **kwargs: {
+        'session_id': control['session_id'], 'meta': meta, 'text': 'Plan the admitted main Task'})
+    event = SimpleNamespace(source={'content': {'org.agentteams.coordination': control}},
+        event_id='$handoff', sender='@leader:test', body='Internal planning wakeup')
+    room = SimpleNamespace(room_id='!task:test')
+    import pytest
+    with pytest.raises(RuntimeError, match='verified handoff admitted'):
+        asyncio.run(channel._on_room_event(room, event))
+    channel._is_dm_room.assert_awaited_once()
+    channel._is_dm_room.reset_mock()
+    control['session_id'] += ':' + event_id
+    asyncio.run(channel._on_room_event(room, event))
+    channel._is_dm_room.assert_not_awaited()

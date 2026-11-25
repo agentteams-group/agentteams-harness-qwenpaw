@@ -3035,7 +3035,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 "project_ready": "coordination-close:" + str(assignment.get("project_id", "")),
                 "main_task_ready": "coordination-close-task:" + str(assignment.get("main_task_id", "")),
             }.get(assignment.get("kind"))
-            if expected_session and assignment.get("main_task_id") and assignment.get("id"):
+            if (assignment.get("kind") in {"task_assigned", "task_submitted", "main_task_ready"}
+                    and expected_session and assignment.get("main_task_id") and assignment.get("id")):
                 expected_session += ":" + str(assignment["id"])
             if (expected_session is None
                     or control_meta.get("sender_id") != event.sender

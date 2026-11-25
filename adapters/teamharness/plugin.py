@@ -430,7 +430,10 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                     "type": "text", "text": self._finished_phase_receipt or (f"Task {self._submitted_task} result submitted; awaiting acceptance."
                         if self._submitted_task else f"Task {self._accepted_task} accepted; the task system handles downstream coordination.")}])
                 agent.state.append_context(agent.name, message.content)
-                visible = self._finished_phase_display if self._finished_phase_receipt else message.content[0].text
+                if not self._finished_phase_receipt:
+                    yield message
+                    return
+                visible = self._finished_phase_display
                 # QwenPaw's channel converter consumes native text-block events,
                 # not the final Msg alone. Emit the saved callback, without a model call.
                 if self._finished_phase_receipt:
