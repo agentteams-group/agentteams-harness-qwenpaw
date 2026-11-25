@@ -73,6 +73,9 @@ class TaskExecution:
         execution = task.get("execution", {}) if task else {}
         operation_state = (((execution.get("checkpoint") or {}).get("operation")) or {}).get("state")
         states = {"active", "released"} if finished or monitoring else {"active"}
+        statuses = {"assigned", "in_progress", "submitted"}
+        if finished or monitoring:
+            statuses.add("completed")
         # The Controller marks a durable started operation as needing
         # verification while its admitted native tool is still running.
         # Monitoring that owner must not cancel the tool before it can verify
@@ -80,10 +83,11 @@ class TaskExecution:
         if monitoring and operation_state == "started":
             states.add("needs_verification")
         if (execution.get("process_id") != self.recovery.process
+                or identity.get("process_id", self.recovery.process) != self.recovery.process
                 or execution.get("generation") != identity["generation"]
                 or identity.get("instance_id", execution.get("instance_id")) != execution.get("instance_id")
                 or execution.get("runtime") != "qwenpaw"
-                or not task or task.get("status") not in {"assigned", "in_progress", "submitted"}
+                or not task or task.get("status") not in statuses
                 or execution.get("state") not in states):
             raise RecoveryConflict("Task was cancelled, reassigned or replaced before native execution "
                 f"(state={execution.get('state')}, operation={operation_state})")
@@ -114,7 +118,7 @@ class TaskExecution:
         task = await asyncio.to_thread(self.recovery.current, identity["task_id"], identity["team_id"])
         if task is None:
             return
-        if task["status"] == "submitted":
+        if task["status"] in {"submitted", "completed"}:
             return
         await asyncio.to_thread(self.verify, identity, finished=True)
         state = await self.channel._workspace.session.get_session_state_dict(
@@ -197,7 +201,7 @@ class TaskExecution:
                     if task is None:
                         continue
                 admission = (team, task_id, identity["generation"])
-                if task["status"] == "submitted" or admission in self.admitted:
+                if task["status"] in {"submitted", "completed"} or admission in self.admitted:
                     continue
                 session_id = await self.select_session(team, task)
                 await asyncio.to_thread(self.verify, identity)
@@ -207,6 +211,7 @@ class TaskExecution:
                              "task_id": task_id, "team_id": team,
                              "execution_generation": identity["generation"],
                              "room_id": task["room_id"], "sender_id": self.channel.matrix_user_id,
+                             "agent_matrix_user_id": self.channel.matrix_user_id,
                              "event_id": f"recovery:{team}/{task_id}:{identity['generation']}",
                              "session_source_event_ids": [source_event.event_id] if source_event else [],
                              "shared_input_keys": [matrix_event_key(task["room_id"], source_event.event_id)] if source_event else [],
@@ -229,7 +234,7 @@ class TaskExecution:
         if not text:
             task = await asyncio.to_thread(self.verify, identity, finished=True)
             cp = task["execution"].get("checkpoint") or {}
-            if task["status"] != "submitted" or not (task.get("result_path") or cp.get("result")):
+            if task["status"] not in {"submitted", "completed"} or not (task.get("result_path") or cp.get("result")):
                 raise RuntimeError("Task turn ended without a durable result")
             # submit_task can end native inference without a final message.
             # prepare_reply verifies and reads the authoritative stored report.
