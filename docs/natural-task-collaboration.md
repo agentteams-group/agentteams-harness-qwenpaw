@@ -17,3 +17,5 @@ The QwenPaw channel converter consumes AgentScope text-block events. A terminal 
 A handoff session is `coordination-handoff:<event-id>` even when it carries a main Task. Only assignment/review/main-ready sessions append the main-task attempt suffix. Check actual Controller session identities rather than duplicating a suffix across all kinds.
 
 Internal coordination turns do not advertise private-conversation stop/steer controls, even while a newly created Task room temporarily has two members. Only ordinary Human DM turns publish direct-execution lifecycle events; native planning, tool progress and coordination receipts continue normally.
+
+Project native QwenPaw envelope tool calls and outputs into the shared Matrix run blocks. Preserve the actual call ID, tool name, redacted arguments, result and failure status; edit the corresponding call rather than counting its output as another tool. Correlate reasoning and the final reply with that same run. Display-only messages carry no mentions and never become model input or a new inference request.
