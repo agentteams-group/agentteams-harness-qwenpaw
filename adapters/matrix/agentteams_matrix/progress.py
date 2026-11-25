@@ -3,6 +3,12 @@ import json
 import time
 
 
+def run_id(room, event=None, task=None):
+    if task:
+        return f"qwenpaw:task:{task['team_id']}:{task['task_id']}:{task['generation']}"
+    return f"qwenpaw:message:{room}:{event}"
+
+
 def bounded(value):
     from runtime_observability import redact
     text = redact(json.dumps(value, ensure_ascii=False, default=str))

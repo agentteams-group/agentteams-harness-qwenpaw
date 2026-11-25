@@ -227,7 +227,7 @@ class TaskExecution:
         task_id, team = identity["task_id"], identity["team_id"]
         event_id = await publish_nio_reply(self.channel, room, checkpoint, text, identity,
             lambda next_cp: self.recovery.checkpoint(task_id, team, next_cp),
-            lambda txn: self.channel.send_task_reply(room, text, txn))
+            lambda txn: self.channel.send_task_reply(room, text, txn, identity))
         return await asyncio.to_thread(self.recovery.delivered, task_id, team, event_id)
 
     async def finish(self, identity, session_id, text):

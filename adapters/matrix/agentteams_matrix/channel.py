@@ -26,6 +26,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
+from .progress import MatrixProgress, run_id
+
 from nio import (
     AsyncClient,
     KeysUploadResponse,
@@ -50,6 +52,7 @@ from nio import (
     RoomMessageVideo,
     ToDeviceEvent,
     ToDeviceError,
+    UnknownEvent,
     UploadResponse,
 )
 from nio.event_builders.direct_messages import ToDeviceMessage
@@ -860,7 +863,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
         if parent.get("rel_type") == "m.thread" and parent.get("event_id"):
             relation.update(rel_type="m.thread", event_id=parent["event_id"], is_falling_back=True)
         response = await self._room_send_with_retry(source["room_id"], "m.room.message", {
-            "msgtype": "m.text", "body": text, "m.relates_to": relation, "org.agentteams.reply_txn": txn}, tx_id=txn)
+            "msgtype": "m.text", "body": text, "m.relates_to": relation, "org.agentteams.reply_txn": txn,
+            "org.agentteams.run_id": run_id(source["room_id"], event)}, tx_id=txn)
         if isinstance(response, RoomSendError) or not getattr(response, "event_id", None):
             raise RuntimeError("Matrix has not acknowledged the saved message reply")
         return response.event_id
@@ -868,7 +872,9 @@ class AgentTeamsMatrixChannel(BaseChannel):
     def _enqueue_matrix_input(self, payload, turn):
         if turn:
             identity = turn["identity"]
-            payload["meta"].update(message_execution=identity, message_session_id=turn["session_id"])
+            meta = payload["meta"]
+            meta["org.agentteams.run_id"] = run_id(meta["room_id"], meta["event_id"])
+            meta.update(message_execution=identity, message_session_id=turn["session_id"])
             if turn.get("history"):
                 payload["content_parts"].insert(0, TextContent(type=ContentType.TEXT, text=turn["history"]))
             if turn["resume_text"]:
@@ -882,9 +888,12 @@ class AgentTeamsMatrixChannel(BaseChannel):
         else:
             self._enqueue(payload)
 
-    async def send_task_reply(self, room_id, text, txn):
+    async def send_task_reply(self, room_id, text, txn, task):
+        identity = run_id(room_id, task=task)
         response = await self._room_send_with_retry(room_id, "m.room.message", {
             "msgtype": "m.text", "body": text, "org.agentteams.progress_only": True, "org.agentteams.reply_txn": txn,
+            "org.agentteams.run_id": identity,
+            "org.agentteams.run": {"version": "1", "run_id": identity, "blocks": [{"type": "text", "text": text}]},
         }, tx_id=txn)
         if isinstance(response, RoomSendError) or not getattr(response, "event_id", None):
             raise RuntimeError("Task reply was not acknowledged by Matrix")
@@ -1318,7 +1327,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         )
         self._client.add_event_callback(
             self._on_coordination_notice,
-            (RoomMessageNotice,),
+            (RoomMessageNotice, UnknownEvent),
         )
         self._client.add_event_callback(
             self._on_room_media_event,
@@ -2972,8 +2981,11 @@ class AgentTeamsMatrixChannel(BaseChannel):
     # (§9).
     # ------------------------------------------------------------------
 
-    async def _on_coordination_notice(self, room: MatrixRoom, event: RoomMessageNotice):
-        content = (getattr(event, "source", {}) or {}).get("content", {})
+    async def _on_coordination_notice(self, room: MatrixRoom, event: RoomMessageNotice | UnknownEvent):
+        source = getattr(event, "source", {}) or {}
+        if source.get("type") not in (None, "m.room.message", "org.agentteams.coordination"):
+            return
+        content = source.get("content", {})
         control = content.get("org.agentteams.coordination")
         meta = control.get("channel_meta", {}) if isinstance(control, dict) else {}
         assignment = meta.get("teamharness_coordination", {}) if isinstance(meta, dict) else {}
@@ -3066,7 +3078,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             )
             return
 
-        text = event.body or ""
+        text = getattr(event, "body", None) or content.get("body", "")
         report = (getattr(event, "source", {}) or {}).get("content", {}).get("org.agentteams.report", {})
         full_text = report.get("text") if isinstance(report, dict) else None
         if isinstance(full_text, str) and len(full_text.encode("utf-8")) <= 16384:
@@ -3082,7 +3094,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             "_on_room_event: sender=%s room=%s body=%r is_dm=%s",
             event.sender,
             room_id,
-            (event.body or "")[:80],
+            text[:80],
             is_dm,
         )
 
@@ -4016,7 +4028,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             or meta_dict.get(_MATRIX_OWN_THREAD_ROOT_KEY)
             or meta_dict.get(_THREAD_META_ROOT_KEY)
         )
-        if not thread_root:
+        if not thread_root and not (meta_dict.get("message_execution") or meta_dict.get("task_execution")):
             meta_dict.setdefault(_MATRIX_PENDING_THREAD_PARTS_KEY, []).extend(
                 parts,
             )
@@ -4069,7 +4081,10 @@ class AgentTeamsMatrixChannel(BaseChannel):
         to_handle: str,
         send_meta: Dict[str, Any],
     ) -> None:
-        """Create a placeholder thread-root message if none exists yet."""
+        """Use the durable execution identity for managed work and a thread for other turns."""
+        if send_meta.get("task_execution") or send_meta.get("message_execution"):
+            send_meta["org.agentteams.run_id"] = run_id(to_handle, send_meta.get("event_id"), send_meta.get("task_execution"))
+            return
         if send_meta.get(_MATRIX_OWN_THREAD_ROOT_KEY):
             return
         if not self._client:
@@ -4111,7 +4126,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             or send_meta.get(_MATRIX_OWN_THREAD_ROOT_KEY)
             or send_meta.get(_THREAD_META_ROOT_KEY)
         )
-        if not thread_root or not self._client:
+        if not self._client or not (thread_root or send_meta.get("org.agentteams.run_id")):
             return None
         content: dict[str, Any] = {
             "msgtype": "m.notice",
@@ -4785,7 +4800,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             return
         del request
         message_type = getattr(event, "type", None)
-        if send_meta.get("message_execution"):
+        if send_meta.get("message_execution") or send_meta.get("task_execution"):
             if self._is_message_event(message_type):
                 send_meta[_MATRIX_PENDING_FINAL_MESSAGE_KEY] = event
                 return
@@ -4801,7 +4816,6 @@ class AgentTeamsMatrixChannel(BaseChannel):
             # show_tool_results disabled: tool output is never rendered to the room.
             return
         if self._is_tool_call_message(message_type) or self._is_tool_output_message(message_type):
-            from .progress import MatrixProgress
             await self._ensure_thread_root(to_handle, send_meta)
             await self._flush_pending_final_message_to_thread(to_handle, send_meta)
             display = send_meta.get("_matrix_native_progress")
@@ -4875,7 +4889,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         del request, accumulated_text
         if _is_assistant_turn(send_meta):
             return
-        if send_meta.get("message_execution") and stream_type == "message":
+        if (send_meta.get("message_execution") or send_meta.get("task_execution")) and stream_type == "message":
             return
         if stream_type == "reasoning":
             send_meta.pop(_MATRIX_STREAMING_REASONING_EVENT_ID_KEY, None)
@@ -5209,7 +5223,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             await self._send_typing(to_handle, False)
             return
         display = send_meta.pop("_matrix_native_progress", None)
-        if display is not None:
+        if display is not None and not (send_meta.get("message_execution") or send_meta.get("task_execution")):
             try:
                 await display.finish()
             except Exception:

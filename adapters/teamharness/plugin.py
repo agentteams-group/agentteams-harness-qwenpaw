@@ -577,6 +577,11 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
             task_tool = _is_task_tool(str(getattr(call, "name", "")))
             if task_tool and isinstance(args, dict):
                 args.pop("_nativeSource", None)
+                args.pop("_nativeRunId", None)
+                if _ctx is not None and args.get("action") in {"plan", "accept", "reject"}:
+                    run = _request_meta(_ctx.request).get("org.agentteams.run_id")
+                    if run:
+                        args["_nativeRunId"] = run
                 review = _review_task.get()
                 if review and args.get("action") in {"accept", "reject"}:
                     try:
