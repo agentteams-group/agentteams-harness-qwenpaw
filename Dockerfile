@@ -228,4 +228,8 @@ COPY --from=agentteams-controller \
     /opt/agentteams/agent/skills/worker-management/scripts/push-worker-skills.sh \
     /opt/agentteams/agent/skills/worker-management/scripts/
 
+COPY health_adapter.py /opt/agentteams/health_adapter.py
+RUN printf '#!/bin/sh\nexec /opt/venv/qwenpaw/bin/python /opt/agentteams/health_adapter.py "$@"\n' > /opt/agentteams/harness-health \
+    && chmod 0755 /opt/agentteams/harness-health
+
 ENTRYPOINT ["/opt/agentteams/scripts/qwenpaw-worker-entrypoint.sh"]
