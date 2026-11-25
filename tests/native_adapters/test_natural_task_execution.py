@@ -2,11 +2,13 @@
 import asyncio
 import copy
 import importlib.util
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from adapter_fixture import HARNESS
+from adapter_fixture import HARNESS, core_source
+sys.path.insert(0, str(core_source() / 'shared/lib'))
 from task_recovery import Recovery, RecoveryConflict
 
 
