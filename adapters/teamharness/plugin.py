@@ -928,12 +928,19 @@ async def _prepare_public_task_event(ctx: Any, event: dict) -> None:
                 ctx.extras[key] = variable.set(prepared[field])
         ctx.inject_context(prepared["fact"] + "\n" + json.dumps(common.model_context(prepared["context"]), ensure_ascii=False), source="teamharness_public_task_prepared")
     _load_phase_skill(ctx, "task-management")
+    if kind == "handoff" and "Skill" in names:
+        ctx.inject_context(
+            "This planning session does not inherit skills read in the intake conversation. "
+            "Before planning, use the native `Skill` viewer to load applicable domain Skills, "
+            "unless their full instructions are already loaded in this session. "
+            "The builtin Task instructions cover coordination, not the domain delivery workflow.",
+            source="teamharness_planning_skills")
     ctx.inject_context(f"Call the native Task tool named `{task_tool_name}` directly for Task operations in this turn.",
                        source="teamharness_public_task_tool")
     for name in names:
         short = name.split("__")[-1].lower()
         legacy = short in {"taskflow", "projectflow", "filesync"}
-        restricted = kind in common.COORDINATION_PHASES and not _is_task_tool(name)
+        restricted = kind in common.COORDINATION_PHASES and not (_is_task_tool(name) or name == "Skill")
         if legacy or restricted:
             await toolkit.remove_tool(name)
 

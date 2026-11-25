@@ -29,6 +29,8 @@ class NativePublicContextTest(unittest.TestCase):
         import mcp.types
         from agentscope.formatter import OpenAIChatFormatter
         from agentscope.permission import PermissionBehavior, PermissionDecision
+        from agentscope.skill import Skill
+        from agentscope.message import ToolCallBlock
         from pydantic import BaseModel
 
         root = core_source()
@@ -61,7 +63,9 @@ class NativePublicContextTest(unittest.TestCase):
                     return mcp.types.CallToolResult(content=[mcp.types.TextContent(type="text", text=json.dumps(result))])
             async def forbidden():
                 raise AssertionError("legacy or Shell tool invoked")
-            toolkit = Toolkit()
+            domain_rule = "Keep independent review and testing separate; only the developer publishes."
+            toolkit = Toolkit(skills_or_loaders=[Skill(name="domain-delivery", description="Domain delivery workflow",
+                                                      dir="/fixture/skills/domain-delivery", markdown=domain_rule, updated_at=0)])
             decision = PermissionDecision(behavior=PermissionBehavior.ALLOW, message="Isolated fixed preparation fixture")
             await toolkit.add_tool(MCPTool("teamharness", mcp.types.Tool(name="task", description="Common Task preparation", inputSchema={"type":"object","required":["action","taskId"],"properties":{"action":{"type":"string"},"taskId":{"type":"string"}}}), session=Session()))
             for name in ("teamharness__taskflow", "teamharness__projectflow", "teamharness__filesync", "execute_shell_command", "run_tool_batch", "workerflow__worker_agentflow", "read_file"):
@@ -79,6 +83,7 @@ class NativePublicContextTest(unittest.TestCase):
                 self.assertEqual(calls, [] if kind == "handoff" else [("begin", "t1")] if kind == "task_assigned" else [("get", "main" if kind == "main_task_ready" else "t1")])
                 names = {tool["function"]["name"] for tool in await toolkit.get_tool_schemas()}
                 self.assertIn("mcp__teamharness__task", names)
+                self.assertIn("Skill", names)
                 self.assertNotIn("teamharness__taskflow", names)
                 self.assertEqual("execute_shell_command" in names, kind == "task_assigned")
                 for name in ("run_tool_batch", "workerflow__worker_agentflow", "read_file"):
@@ -87,7 +92,13 @@ class NativePublicContextTest(unittest.TestCase):
                 if kind == "task_assigned": self.assertEqual(plugin._ack_scope.get()[2], "canonical-cr")
                 elif kind == "task_submitted": self.assertEqual(plugin._review_task.get(), ("t1", "s1"))
                 elif kind == "main_task_ready": self.assertEqual(plugin._completion_task.get(), "main")
-                else: self.assertEqual(plugin._planning_tasks.get(), frozenset({"main"}))
+                else:
+                    self.assertEqual(plugin._planning_tasks.get(), frozenset({"main"}))
+                    self.assertTrue(any("domain Skills" in text and "Skill" in text for text in texts))
+                    viewed = [item async for item in toolkit.call_tool(
+                        ToolCallBlock(id="domain-rule", name="Skill", input=json.dumps({"skill": "domain-delivery"})), agent.state)]
+                    self.assertTrue(any(domain_rule in getattr(block, "text", "")
+                                        for item in viewed for block in item.content))
             finally:
                 plugin._reset_public_task_io(ctx)
                 for key, var in (("execution_task_token", plugin._execution_task), ("ack_scope_token", plugin._ack_scope), ("review_task_token", plugin._review_task), ("completion_task_token", plugin._completion_task), ("source_event_token", plugin._source_event), ("planning_tasks_token", plugin._planning_tasks), ("phase_retry_token", plugin._phase_retry)):
