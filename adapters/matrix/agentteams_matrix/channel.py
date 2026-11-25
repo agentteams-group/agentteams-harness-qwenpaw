@@ -4422,8 +4422,11 @@ class AgentTeamsMatrixChannel(BaseChannel):
             "formatted_body": html_body if html_body is not None else _md_to_html(text),
         }
         meta_dict = meta if isinstance(meta, dict) else {}
-        if meta_dict.get("org.agentteams.run_id"):
-            content["org.agentteams.run_id"] = meta_dict["org.agentteams.run_id"]
+        if run_id := meta_dict.get("org.agentteams.run_id"):
+            content["org.agentteams.run_id"] = run_id
+            if msgtype == "m.text" and _is_task_coordination(meta_dict) and not meta_dict.get("org.agentteams.approval"):
+                content["org.agentteams.run"] = {"version": "1", "run_id": run_id,
+                                                "blocks": [{"type": "text", "text": text}]}
         sender_id = meta_dict.get("sender_id") or meta_dict.get("user_id")
         explicit_ids = meta_dict.get("mention_user_ids") or None
         if explicit_ids or self._extract_mentions_from_text(text):
@@ -4816,7 +4819,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             return
         del request
         message_type = getattr(event, "type", None)
-        if send_meta.get("message_execution") or send_meta.get("task_execution"):
+        if send_meta.get("message_execution") or send_meta.get("task_execution") or _is_task_coordination(send_meta):
             if self._is_message_event(message_type):
                 send_meta[_MATRIX_PENDING_FINAL_MESSAGE_KEY] = event
                 return

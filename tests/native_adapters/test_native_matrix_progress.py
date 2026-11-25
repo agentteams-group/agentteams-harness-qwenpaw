@@ -127,3 +127,28 @@ def test_typed_planning_event_uses_verified_ingress_with_its_original_type():
         await channel._on_coordination_notice('!task:test', unrelated)
         channel._on_room_event.assert_awaited_once()
     asyncio.run(check())
+
+
+def test_leader_coordination_drops_pre_tool_draft_and_publishes_structured_final():
+    from agentteams_matrix import channel as mod
+
+    async def check():
+        channel = mod.AgentTeamsMatrixChannel.__new__(mod.AgentTeamsMatrixChannel)
+        channel._client = object()
+        channel._room_send_with_retry = AsyncMock(return_value=SimpleNamespace(event_id='$tool'))
+        channel.show_tool_calls = True
+        channel._extract_mentions_from_text = lambda text: []
+        channel.send_message_content = AsyncMock()
+        meta = {'room_id': '!task', 'event_id': '$ready', 'teamharness_matrix_coordination': True,
+                'teamharness_coordination': {'kind': 'main_task_ready'},
+                mod._MATRIX_THREAD_META_KEY: '$ready'}
+        narration = SimpleNamespace(type=mod.MessageType.MESSAGE)
+        await channel.on_event_message_completed(None, '!task', narration, meta)
+        await channel.on_event_message_completed(None, '!task', SimpleNamespace(type=mod.MessageType.FUNCTION_CALL, content=[]), meta)
+        channel.send_message_content.assert_not_awaited()
+        content = channel._matrix_text_content('!task', '验收通过，两份交付件均已检查。', meta, 'm.text')
+        run_id = content['org.agentteams.run_id']
+        assert content['org.agentteams.run'] == {'version': '1', 'run_id': run_id,
+                                                  'blocks': [{'type': 'text', 'text': content['body']}]}
+        assert content['org.agentteams.progress_only']
+    asyncio.run(check())

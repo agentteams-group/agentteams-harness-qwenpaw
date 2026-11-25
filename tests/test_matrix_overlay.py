@@ -166,6 +166,7 @@ def _load_overlay_module():
                 "SyncResponse",
                 "ToDeviceEvent",
                 "ToDeviceError",
+                "UnknownEvent",
                 "UploadResponse",
             )
         },
