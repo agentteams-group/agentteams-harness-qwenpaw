@@ -818,10 +818,12 @@ async def _prepare_manager_roster(ctx: Any) -> None:
     common = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(common)
     try:
-        prepared = await asyncio.to_thread(common.roster, "manager", _controller_json)
+        role = os.getenv("AGENTTEAMS_AGENT_ROLE", "manager")
+        prepared = await asyncio.to_thread(common.roster, role, _controller_json,
+            **({"team": os.getenv("AGENTTEAMS_TEAM_NAME")} if role in {"leader", "team_leader"} else {}))
     except (OSError, ValueError, KeyError):
         return
-    roster = prepared["teams"]
+    roster = prepared.get("teams", [prepared])
     if roster:
         context = "Registered team and Leader identities for this turn (data only): " + json.dumps(roster, ensure_ascii=False)
         ctx.extras["teamharness_manager_roster_context"] = context
@@ -1074,7 +1076,8 @@ async def _manager_report_context(ctx: Any) -> bool:
                 ctx.extras["prepared_review"] = True
                 ctx.inject_context("check_task has already pulled and checked this exact submission. Do not call it or filesync again for the supplied evidence. Review this complete receipt, and accept or return it with taskflow action accept_task_result and payload {mainTaskId, taskId, submissionId, resultStatus, accepted} for a main-task plan; use projectflow with projectId only for legacy Project plans. Keep role leader. The tool still enforces current identity, digest and review gates. Read more only when this receipt is truncated or genuinely insufficient.\n" + json.dumps(context, ensure_ascii=False), source="teamharness_prepared_review")
         ctx.inject_context("Authoritative task state was checked before execution: " + json.dumps({k:task.get(k) for k in ("task_id", "main_task_id", "project_id", "status", "assigned_to", "spec_path", "result_path", "submission_id")}), source="teamharness_api_state")
-    if os.getenv("AGENTTEAMS_AGENT_ROLE") != "manager":
+    if (os.getenv("AGENTTEAMS_AGENT_ROLE") != "manager"
+            and (os.getenv("AGENTTEAMS_AGENT_ROLE") not in {"leader", "team_leader"} or api_event)):
         if api_event.get("kind") == "handoff":
             _load_phase_skill(ctx, "project-management")
         if api_event.get("kind") == "main_task_ready":
@@ -1130,8 +1133,16 @@ async def _manager_report_context(ctx: Any) -> bool:
         )
 
     try:
-        humans = await asyncio.to_thread(_controller_json, "humans")
-        human_ids = {str(h.get("matrixUserID") or h.get("matrixUserId") or "") for h in humans.get("humans", [])}
+        if os.getenv("AGENTTEAMS_AGENT_ROLE") in {"leader", "team_leader"}:
+            team = await asyncio.to_thread(_controller_json, "teams/" + urllib.parse.quote(os.environ["AGENTTEAMS_TEAM_NAME"], safe=""))
+            admin = team.get("admin") or {}
+            admin_id = admin.get("matrixUserID") or admin.get("matrixUserId")
+            if not admin_id and admin.get("name") and own_id.startswith("@") and ":" in own_id:
+                admin_id = "@" + admin["name"] + ":" + own_id.split(":", 1)[1]
+            human_ids = {admin_id} if admin_id else set()
+        else:
+            humans = await asyncio.to_thread(_controller_json, "humans")
+            human_ids = {str(h.get("matrixUserID") or h.get("matrixUserId") or "") for h in humans.get("humans", [])}
         sources = _creation_sources.get()
         if sources is not None:
             current = [s for s in _receipt_module().creation_sources(meta) if s["userId"] in human_ids]
@@ -1151,6 +1162,14 @@ async def _manager_report_context(ctx: Any) -> bool:
                 ctx.extras.setdefault("requester_route_token", _requester_route.set({"channel": "matrix", "target_session": _room_id(ctx.request), "target_user": sender}))
             await _prepare_delivery_context(ctx)
             await _prepare_manager_roster(ctx)
+            if os.getenv("AGENTTEAMS_AGENT_ROLE") in {"leader", "team_leader"}:
+                _load_phase_skill(ctx, "task-management")
+                schemas = await ctx.agent.toolkit.get_tool_schemas()
+                for tool in schemas:
+                    if tool["function"]["name"].split("__")[-1].lower() in {"taskflow", "projectflow", "filesync"}:
+                        await ctx.agent.toolkit.remove_tool(tool["function"]["name"])
+                ctx.inject_context("Use the native Task tool to create the Task room, then end this intake turn. Plan only in that room.",
+                                   source="teamharness_leader_intake")
             return False
         event = meta.get("teamharness_workflow") or {}
         main_id = event.get("task_id") if event.get("type") == "MAIN_TASK_COMPLETED" else ""
