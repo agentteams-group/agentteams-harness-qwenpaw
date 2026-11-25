@@ -26,7 +26,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from .progress import MatrixProgress, run_id
 
 from nio import (
     AsyncClient,
@@ -437,6 +436,12 @@ class _LegacySyncTokenStore:
             "the QwenPaw channel does not persist per-(room, sender) "
             "session keys"
         )
+
+
+def _run_id(room, event=None, task=None):
+    if task:
+        return f"qwenpaw:task:{task['team_id']}:{task['task_id']}:{task['generation']}"
+    return f"qwenpaw:message:{room}:{event}"
 
 
 def _is_assistant_turn(meta):
@@ -864,7 +869,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             relation.update(rel_type="m.thread", event_id=parent["event_id"], is_falling_back=True)
         response = await self._room_send_with_retry(source["room_id"], "m.room.message", {
             "msgtype": "m.text", "body": text, "m.relates_to": relation, "org.agentteams.reply_txn": txn,
-            "org.agentteams.run_id": run_id(source["room_id"], event)}, tx_id=txn)
+            "org.agentteams.run_id": _run_id(source["room_id"], event)}, tx_id=txn)
         if isinstance(response, RoomSendError) or not getattr(response, "event_id", None):
             raise RuntimeError("Matrix has not acknowledged the saved message reply")
         return response.event_id
@@ -873,7 +878,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         if turn:
             identity = turn["identity"]
             meta = payload["meta"]
-            meta["org.agentteams.run_id"] = run_id(meta["room_id"], meta["event_id"])
+            meta["org.agentteams.run_id"] = _run_id(meta["room_id"], meta["event_id"])
             meta.update(message_execution=identity, message_session_id=turn["session_id"])
             if turn.get("history"):
                 payload["content_parts"].insert(0, TextContent(type=ContentType.TEXT, text=turn["history"]))
@@ -889,7 +894,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             self._enqueue(payload)
 
     async def send_task_reply(self, room_id, text, txn, task):
-        identity = run_id(room_id, task=task)
+        identity = _run_id(room_id, task=task)
         response = await self._room_send_with_retry(room_id, "m.room.message", {
             "msgtype": "m.text", "body": text, "org.agentteams.progress_only": True, "org.agentteams.reply_txn": txn,
             "org.agentteams.run_id": identity,
@@ -4083,7 +4088,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
     ) -> None:
         """Use the durable execution identity for managed work and a thread for other turns."""
         if send_meta.get("task_execution") or send_meta.get("message_execution"):
-            send_meta["org.agentteams.run_id"] = run_id(to_handle, send_meta.get("event_id"), send_meta.get("task_execution"))
+            send_meta["org.agentteams.run_id"] = _run_id(to_handle, send_meta.get("event_id"), send_meta.get("task_execution"))
             return
         if send_meta.get(_MATRIX_OWN_THREAD_ROOT_KEY):
             return
@@ -4816,6 +4821,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             # show_tool_results disabled: tool output is never rendered to the room.
             return
         if self._is_tool_call_message(message_type) or self._is_tool_output_message(message_type):
+            from .progress import MatrixProgress
             await self._ensure_thread_root(to_handle, send_meta)
             await self._flush_pending_final_message_to_thread(to_handle, send_meta)
             display = send_meta.get("_matrix_native_progress")
