@@ -15,3 +15,5 @@ A Leader's direct intake must pass the role gate and use its own registered Team
 The QwenPaw channel converter consumes AgentScope text-block events. A terminal native callback emits those events and a final Msg without a ModelCall event or provider request; returning Msg alone passes Agent.reply fixtures but leaves real streaming channels without a final result. Thinking/tool/placeholder events carry `org.agentteams.progress_only` at the producer so other Harnesses never ingest them as business input.
 
 A handoff session is `coordination-handoff:<event-id>` even when it carries a main Task. Only assignment/review/main-ready sessions append the main-task attempt suffix. Check actual Controller session identities rather than duplicating a suffix across all kinds.
+
+Internal coordination turns do not advertise private-conversation stop/steer controls, even while a newly created Task room temporarily has two members. Only ordinary Human DM turns publish direct-execution lifecycle events; native planning, tool progress and coordination receipts continue normally.

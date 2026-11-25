@@ -70,3 +70,18 @@ def test_handoff_with_main_task_does_not_duplicate_its_session_suffix(monkeypatc
     control['session_id'] += ':' + event_id
     asyncio.run(channel._on_room_event(room, event))
     channel._is_dm_room.assert_not_awaited()
+
+
+def test_internal_coordination_does_not_advertise_private_conversation_controls(monkeypatch):
+    channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+    channel._direct_runs = {}
+    channel._publish_direct_execution = AsyncMock()
+    async def native_stream(self, payload):
+        yield 'native tool progress'
+    monkeypatch.setattr(AgentTeamsMatrixChannel.__mro__[1], '_stream_with_tracker', native_stream)
+    async def run():
+        payload = {'meta': {'room_id': '!task:test', 'event_id': '$control', 'is_dm': True,
+                            'teamharness_matrix_coordination': True}}
+        assert [part async for part in channel._stream_matrix_payload(payload)] == ['native tool progress']
+    asyncio.run(run())
+    channel._publish_direct_execution.assert_not_awaited()
