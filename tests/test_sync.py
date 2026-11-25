@@ -61,6 +61,44 @@ def test_mirror_all_restores_worker_and_shared_storage(tmp_path: Path, monkeypat
     ]
 
 
+@pytest.mark.parametrize("failures", [1, 2, 3])
+def test_mirror_retries_short_reads_with_a_limit(tmp_path: Path, monkeypatch, failures: int) -> None:
+    sync = _sync(tmp_path)
+    monkeypatch.setattr(sync, "ensure_alias", lambda: None)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    calls = []
+
+    def fake_mc(*args, **_kwargs):
+        calls.append(args)
+        if len(calls) <= failures:
+            raise subprocess.CalledProcessError(1, args, stderr="Input reader closed pre-maturely. Expected `224` bytes, but only received `176` bytes.")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sync, "_mc", fake_mc)
+    if failures < 3:
+        sync._mirror_prefix(sync.remote_prefix, sync.local_dir)
+        assert len(calls) == failures + 1
+    else:
+        with pytest.raises(RuntimeError, match="mirror storage failed"):
+            sync._mirror_prefix(sync.remote_prefix, sync.local_dir)
+        assert len(calls) == 3
+    assert all(command == calls[0] for command in calls)
+
+
+def test_mirror_does_not_retry_permission_errors(tmp_path: Path, monkeypatch) -> None:
+    sync = _sync(tmp_path)
+    calls = []
+
+    def fake_mc(*args, **_kwargs):
+        calls.append(args)
+        raise subprocess.CalledProcessError(1, args, stderr="Access Denied")
+
+    monkeypatch.setattr(sync, "_mc", fake_mc)
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        sync._mirror_prefix(sync.remote_prefix, sync.local_dir)
+    assert len(calls) == 1
+
+
 def test_pull_runtime_config_downloads_controller_projection(tmp_path: Path, monkeypatch) -> None:
     sync = _sync(tmp_path)
     commands = []
