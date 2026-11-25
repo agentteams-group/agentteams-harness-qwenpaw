@@ -184,6 +184,9 @@ if [ -f "${PENDING_UPGRADE}" ] && [ -f "${UPGRADE_SH}" ]; then
     fi
 fi
 
+if [ -n "${AGENTTEAMS_STORAGE_PREFIX:-}" ]; then
+    python3 /opt/agentteams/scripts/lib/harness_health.py --runtime qwenpaw --member "${AGENTTEAMS_WORKER_NAME}" --parent "$$" &
+fi
 # No pending upgrade left to verify: normal foreground start.
 if [ "${POST_START}" -ne 1 ]; then
     exec "${VENV}/bin/qwenpaw-worker" "${CMD_ARGS[@]}"
