@@ -89,6 +89,13 @@ def _install_module(name: str, **attrs):
 
 def _load_overlay_module():
     root = "_qwenpaw_matrix_plugin_test"
+    # Load shared transport against the actual nio dependency before installing
+    # channel-only stubs. It imports event types these stubs do not implement.
+    import os
+    core = Path(os.environ.get("AGENTTEAMS_CORE_SOURCE", HARNESS_ROOT / ".deps/AgentTeams"))
+    sys.path.insert(0, str(core / "plugins/agentteams-matrix"))
+    import core.transport
+    _install_module(root, __path__=[str(OVERLAY.parent)])
 
     class _Dummy:
         pass
@@ -399,7 +406,8 @@ def test_matrix_thread_parts_prefer_own_processing_root_over_incoming_root() -> 
         channel.on_event_message_completed(
             SimpleNamespace(),
             "!room:hs.local",
-            SimpleNamespace(type="MessageType.MCP_TOOL_CALL", text="tool call"),
+            SimpleNamespace(type="MessageType.MCP_TOOL_CALL", content=[SimpleNamespace(data={
+                "call_id":"actual-read", "name":"read_file", "arguments":"{\"path\":\"index.html\"}"})]),
             meta,
         ),
     )
@@ -412,8 +420,11 @@ def test_matrix_thread_parts_prefer_own_processing_root_over_incoming_root() -> 
     ]
     assert [event["body"] for event in thread_events] == [
         "first note",
-        "tool call",
     ]
+    tools = [content["org.agentteams.run"]["blocks"][0]
+             for _, _, content, _ in channel._client.sent if "org.agentteams.run" in content]
+    assert tools[0]["tool_call_id"] == "actual-read"
+    assert tools[0]["arguments"] == {"path":"index.html"}
     assert {
         event["m.relates_to"]["event_id"] for event in thread_events
     } == {"$sent1"}
@@ -495,7 +506,8 @@ def test_matrix_streaming_reasoning_waits_for_end_before_thread_item() -> None:
         channel.on_event_message_completed(
             SimpleNamespace(),
             "!room:hs.local",
-            SimpleNamespace(type="MessageType.MCP_TOOL_CALL", text="tool call"),
+            SimpleNamespace(type="MessageType.MCP_TOOL_CALL", content=[SimpleNamespace(data={
+                "call_id":"actual-read", "name":"read_file", "arguments":"{}"})]),
             meta,
         ),
     )
@@ -548,12 +560,8 @@ def test_matrix_streaming_reasoning_waits_for_end_before_thread_item() -> None:
 
     assert channel._client.sent[0][2]["body"] == "处理中..."
     tool_call = channel._client.sent[2][2]
-    assert tool_call["body"] == "tool call"
-    assert tool_call["m.relates_to"] == {
-        "rel_type": "m.thread",
-        "event_id": "$sent1",
-        "is_falling_back": False,
-    }
+    assert tool_call["org.agentteams.run"]["blocks"][0]["tool_name"] == "read_file"
+    assert tool_call["org.agentteams.run"]["run_id"] == meta["org.agentteams.run_id"]
     second_thinking = channel._client.sent[3][2]
     assert second_thinking["body"] == "Thinking:\n\nsecond step thinking"
     assert second_thinking["m.relates_to"] == {
@@ -561,7 +569,7 @@ def test_matrix_streaming_reasoning_waits_for_end_before_thread_item() -> None:
         "event_id": "$sent1",
         "is_falling_back": False,
     }
-    final = channel._client.sent[4][2]
+    final = channel._client.sent[-1][2]
     assert final["m.relates_to"] == {
         "rel_type": "m.replace",
         "event_id": "$sent1",

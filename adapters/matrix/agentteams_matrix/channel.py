@@ -740,7 +740,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 yield item
             return
         room_id, run_id = meta.get("room_id"), meta.get("event_id")
-        if _is_assistant_turn(meta) or not meta.get("is_dm") or not room_id or not run_id:
+        if (_is_assistant_turn(meta) or meta.get("teamharness_matrix_coordination")
+                or not meta.get("is_dm") or not room_id or not run_id):
             async for item in super()._stream_with_tracker(payload):
                 yield item
             return
@@ -4077,6 +4078,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             "msgtype": "m.notice",
             "body": "处理中...",
             "org.agentteams.progress_only": True,
+            "org.agentteams.run_id": send_meta.setdefault("org.agentteams.run_id", "qwenpaw:" + uuid4().hex),
         }
         try:
             resp = await self._room_send_with_retry(
@@ -4118,6 +4120,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             "format": "org.matrix.custom.html",
             "formatted_body": _md_to_html(text),
         }
+        if send_meta.get("org.agentteams.run_id"):
+            content["org.agentteams.run_id"] = send_meta["org.agentteams.run_id"]
         self._apply_thread_relation(
             content,
             self._with_thread_relation_meta(send_meta, thread_root),
@@ -4146,10 +4150,13 @@ class AgentTeamsMatrixChannel(BaseChannel):
         msgtype: str = "m.notice",
         html: Optional[str] = None,
         progress_only: bool = False,
+        run_id: Optional[str] = None,
     ) -> None:
         if not event_id or not self._client:
             return
         new_content: dict[str, Any] = {"msgtype": msgtype, "body": text}
+        if run_id:
+            new_content["org.agentteams.run_id"] = run_id
         if html:
             new_content["format"] = "org.matrix.custom.html"
             new_content["formatted_body"] = html
@@ -4384,6 +4391,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             "formatted_body": html_body if html_body is not None else _md_to_html(text),
         }
         meta_dict = meta if isinstance(meta, dict) else {}
+        if meta_dict.get("org.agentteams.run_id"):
+            content["org.agentteams.run_id"] = meta_dict["org.agentteams.run_id"]
         sender_id = meta_dict.get("sender_id") or meta_dict.get("user_id")
         explicit_ids = meta_dict.get("mention_user_ids") or None
         if explicit_ids or self._extract_mentions_from_text(text):
@@ -4619,6 +4628,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             msgtype=msgtype,
             html=html,
             progress_only=msgtype == "m.notice" or bool(send_meta.get("teamharness_matrix_coordination")),
+            run_id=send_meta.get("org.agentteams.run_id"),
         )
 
     # ------------------------------------------------------------------
@@ -4789,6 +4799,25 @@ class AgentTeamsMatrixChannel(BaseChannel):
             return
         if self._is_tool_output_message(message_type) and not self.show_tool_results:
             # show_tool_results disabled: tool output is never rendered to the room.
+            return
+        if self._is_tool_call_message(message_type) or self._is_tool_output_message(message_type):
+            from .progress import MatrixProgress
+            await self._ensure_thread_root(to_handle, send_meta)
+            await self._flush_pending_final_message_to_thread(to_handle, send_meta)
+            display = send_meta.get("_matrix_native_progress")
+            if display is None:
+                async def send(content):
+                    return await self._room_send_with_retry(to_handle, "m.room.message", content)
+                display = send_meta["_matrix_native_progress"] = MatrixProgress(send, send_meta["org.agentteams.run_id"])
+            try:
+                await display.tool(event, finished=self._is_tool_output_message(message_type))
+            except Exception:
+                logger.exception("Matrix native tool progress delivery failed")
+            send_meta[_MATRIX_TURN_TOOL_ACTIVITY_KEY] = True
+            if self._is_tool_output_message(message_type):
+                parts = self._tool_output_media_parts(event)
+                if parts:
+                    await self.send_content_parts(to_handle, parts, send_meta)
             return
         if self._is_reasoning_message(
             message_type,
@@ -5179,6 +5208,12 @@ class AgentTeamsMatrixChannel(BaseChannel):
         if _is_assistant_turn(send_meta):
             await self._send_typing(to_handle, False)
             return
+        display = send_meta.pop("_matrix_native_progress", None)
+        if display is not None:
+            try:
+                await display.finish()
+            except Exception:
+                logger.exception("Matrix native progress closure failed")
         if send_meta.get("message_execution") or send_meta.get("task_execution"):
             text = send_meta.pop(_MATRIX_STREAMING_FINAL_TEXT_KEY, "")
             pending = send_meta.pop(_MATRIX_PENDING_FINAL_MESSAGE_KEY, None)
