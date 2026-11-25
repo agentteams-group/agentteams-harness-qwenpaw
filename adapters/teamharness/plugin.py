@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import sys
 from typing import Any, AsyncGenerator, Callable
 import urllib.request
 import urllib.parse
@@ -22,6 +23,7 @@ PLUGIN_DIR = Path(__file__).parent.resolve()
 _requester_route: ContextVar[dict[str, Any] | None] = ContextVar("teamharness_requester_route", default=None)
 _coordinator_route: ContextVar[dict[str, Any] | None] = ContextVar("teamharness_coordinator_route", default=None)
 _source_event: ContextVar[str] = ContextVar("teamharness_source_event", default="")
+_native_actor: ContextVar[str] = ContextVar("teamharness_native_actor", default="")
 _handled_refresh_input: ContextVar[str] = ContextVar("teamharness_handled_refresh_input", default="")
 _creation_sources: ContextVar[list[dict] | None] = ContextVar("teamharness_creation_sources", default=None)
 _execution_task: ContextVar[str] = ContextVar("teamharness_execution_task", default="")
@@ -134,6 +136,17 @@ def _task_context_module():
 
 
 @lru_cache(maxsize=1)
+def _native_module():
+    path = ASSET_DIR / "mcp/common/task_native.py"
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location("teamharness_native_feedback", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
 def _phase_module():
     spec = importlib.util.spec_from_file_location(
         "teamharness_phase_recovery", ASSET_DIR / "mcp/common/phase_recovery.py")
@@ -215,6 +228,7 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
         _accepted_task = ""
         _task_scope = None
         _finished_phase_receipt = ""
+        _finished_phase_display = "NO_REPLY"
         _creation_refresh_pending = False
 
         async def on_system_prompt(self, agent: Any, current_prompt: str) -> str:
@@ -292,16 +306,35 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                 self._record_intake_outcome(creation_source, "registered")
                 self._registered_inputs = getattr(self, "_registered_inputs", set()) | {creation_source, *(related_sources or [])}
                 fact += receipts.creation_coverage_context(_creation_sources.get() or [], self._registered_inputs)
-            item.content.insert(0, TextBlock(text=fact + "\n"))
+            extra = []
+            if not creation_source and action == "submit" and _native_actor.get():
+                extra = _native_module().dispatched_receipts(result, _native_actor.get(), _controller_json,
+                                                             wait_for_send=True)
+            outcome = {"phaseComplete": True, "result": result, "receiptId": receipt[0], "fact": fact,
+                       "extraReceipts": extra}
+            projected = _native_module().model_result(outcome)
+            if creation_source:
+                projected["phaseComplete"] = (os.getenv("AGENTTEAMS_AGENT_ROLE") in {"leader", "team_leader"}
+                    and all(source["eventId"] in self._registered_inputs for source in (_creation_sources.get() or []))
+                    and (result.get("notification") or {}).get("status") != "inline")
+            elif action == "plan":
+                projected["phaseComplete"] = _planning_tasks.get().issubset(getattr(self, "_planned_tasks", set()) | {task_id})
+            item.content[:] = [TextBlock(text=json.dumps(projected, ensure_ascii=False))]
             self._task_receipt_ids = seen | {receipt[0]}
             if creation_source:
+                if (os.getenv("AGENTTEAMS_AGENT_ROLE") in {"leader", "team_leader"}
+                        and all(source["eventId"] in self._registered_inputs for source in (_creation_sources.get() or []))
+                        and (result.get("notification") or {}).get("status") != "inline"):
+                    self._finished_phase_receipt = fact
+                    self._finished_phase_display = _native_module().terminal_display("create", args, result) or "NO_REPLY"
                 return
             if not creation_source and action == "plan":
                 planned = getattr(self, "_planned_tasks", set()) | {task_id}
                 self._planned_tasks = planned
                 if _planning_tasks.get() - planned:
                     return
-            self._finished_phase_receipt = receipt[1]
+            self._finished_phase_receipt = "\n\n".join([fact, *[entry["fact"] for entry in extra]])
+            self._finished_phase_display = _native_module().terminal_display(action, args, result) or "NO_REPLY"
 
         def _record_intake_outcome(self, event_id: str, outcome: str) -> None:
             if os.getenv("AGENTTEAMS_OTEL_ENABLED", "").lower() != "true":
@@ -397,7 +430,20 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                     "type": "text", "text": self._finished_phase_receipt or (f"Task {self._submitted_task} result submitted; awaiting acceptance."
                         if self._submitted_task else f"Task {self._accepted_task} accepted; the task system handles downstream coordination.")}])
                 agent.state.append_context(agent.name, message.content)
-                yield message
+                if not self._finished_phase_receipt:
+                    yield message
+                    return
+                visible = self._finished_phase_display
+                # QwenPaw's channel converter consumes native text-block events,
+                # not the final Msg alone. Emit the saved callback, without a model call.
+                if self._finished_phase_receipt:
+                    from agentscope.event import TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent
+                    from uuid import uuid4
+                    block = uuid4().hex
+                    yield TextBlockStartEvent(reply_id=agent.state.reply_id, block_id=block)
+                    yield TextBlockDeltaEvent(reply_id=agent.state.reply_id, block_id=block, delta=visible)
+                    yield TextBlockEndEvent(reply_id=agent.state.reply_id, block_id=block, text=visible)
+                yield Msg(name=agent.name, role="assistant", content=[{"type": "text", "text": visible}])
                 return
             if (_phase_retry.get() or {}).get("failed"):
                 from agentscope.message import Msg
@@ -539,7 +585,7 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                         from agentscope.tool import ToolResponse
                         yield ToolResponse(state="error", content=[{"type": "text", "text": str(error)}])
                         return
-                if args.get("action") == "create" and os.getenv("AGENTTEAMS_AGENT_ROLE") == "manager":
+                if args.get("action") == "create" and os.getenv("AGENTTEAMS_AGENT_ROLE") in {"manager", "leader", "team_leader"}:
                     if self._creation_refresh_pending:
                         from agentscope.tool import ToolResponse
                         yield ToolResponse(state="error", content=[{"type":"text", "text":"No Task created. Interpret the refreshed Human inputs before choosing another operation."}])
@@ -555,7 +601,7 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
                     args["_nativeSource"] = selected
                 if json_input:
                     call.input = json.dumps(args, ensure_ascii=False)
-            if name == "execute_shell_command" and isinstance(args, dict) and os.getenv("AGENTTEAMS_AGENT_ROLE") == "manager":
+            if name == "execute_shell_command" and isinstance(args, dict) and os.getenv("AGENTTEAMS_AGENT_ROLE") in {"manager", "leader", "team_leader"}:
                 requested = receipts.creation_command_input(args.get("command"))
                 if requested is not None:
                     if self._creation_refresh_pending:
@@ -784,10 +830,12 @@ async def _prepare_manager_roster(ctx: Any) -> None:
     common = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(common)
     try:
-        prepared = await asyncio.to_thread(common.roster, "manager", _controller_json)
+        role = os.getenv("AGENTTEAMS_AGENT_ROLE", "manager")
+        prepared = await asyncio.to_thread(common.roster, role, _controller_json,
+            **({"team": os.getenv("AGENTTEAMS_TEAM_NAME")} if role in {"leader", "team_leader"} else {}))
     except (OSError, ValueError, KeyError):
         return
-    roster = prepared["teams"]
+    roster = prepared.get("teams", [prepared])
     if roster:
         context = "Registered team and Leader identities for this turn (data only): " + json.dumps(roster, ensure_ascii=False)
         ctx.extras["teamharness_manager_roster_context"] = context
@@ -878,7 +926,7 @@ async def _prepare_public_task_event(ctx: Any, event: dict) -> None:
             if field in prepared:
                 key = {"execution": "execution_task_token", "ack": "ack_scope_token", "review": "review_task_token", "completion": "completion_task_token"}[field]
                 ctx.extras[key] = variable.set(prepared[field])
-        ctx.inject_context(prepared["fact"] + "\n" + json.dumps(prepared["context"], ensure_ascii=False), source="teamharness_public_task_prepared")
+        ctx.inject_context(prepared["fact"] + "\n" + json.dumps(common.model_context(prepared["context"]), ensure_ascii=False), source="teamharness_public_task_prepared")
     _load_phase_skill(ctx, "task-management")
     ctx.inject_context(f"Call the native Task tool named `{task_tool_name}` directly for Task operations in this turn.",
                        source="teamharness_public_task_tool")
@@ -926,6 +974,8 @@ async def _manager_report_context(ctx: Any) -> bool:
         return False
     request = ctx.request.model_dump() if hasattr(ctx.request, "model_dump") else vars(ctx.request)
     meta = _request_meta(ctx.request)
+    if meta.get("agent_matrix_user_id"):
+        ctx.extras["native_actor_token"] = _native_actor.set(str(meta["agent_matrix_user_id"]))
     if meta.get("task_execution"):
         # Startup admissions carry a process-fenced Task, not a new Matrix
         # assignment or a request to recreate its legacy Project context.
@@ -947,7 +997,7 @@ async def _manager_report_context(ctx: Any) -> bool:
         return False
     if meta.get("event_id"):
         ctx.extras["source_event_token"] = _source_event.set(str(meta["event_id"]))
-    if os.getenv("AGENTTEAMS_AGENT_ROLE") == "manager" and meta.get("event_id"):
+    if os.getenv("AGENTTEAMS_AGENT_ROLE") in {"manager", "leader", "team_leader"} and meta.get("event_id"):
         # An unavailable/invalid batch must never fall back to its first source.
         ctx.extras["creation_sources_token"] = _creation_sources.set([])
     api_event = meta.get("teamharness_coordination") or {}
@@ -1038,7 +1088,8 @@ async def _manager_report_context(ctx: Any) -> bool:
                 ctx.extras["prepared_review"] = True
                 ctx.inject_context("check_task has already pulled and checked this exact submission. Do not call it or filesync again for the supplied evidence. Review this complete receipt, and accept or return it with taskflow action accept_task_result and payload {mainTaskId, taskId, submissionId, resultStatus, accepted} for a main-task plan; use projectflow with projectId only for legacy Project plans. Keep role leader. The tool still enforces current identity, digest and review gates. Read more only when this receipt is truncated or genuinely insufficient.\n" + json.dumps(context, ensure_ascii=False), source="teamharness_prepared_review")
         ctx.inject_context("Authoritative task state was checked before execution: " + json.dumps({k:task.get(k) for k in ("task_id", "main_task_id", "project_id", "status", "assigned_to", "spec_path", "result_path", "submission_id")}), source="teamharness_api_state")
-    if os.getenv("AGENTTEAMS_AGENT_ROLE") != "manager":
+    if (os.getenv("AGENTTEAMS_AGENT_ROLE") != "manager"
+            and (os.getenv("AGENTTEAMS_AGENT_ROLE") not in {"leader", "team_leader"} or api_event)):
         if api_event.get("kind") == "handoff":
             _load_phase_skill(ctx, "project-management")
         if api_event.get("kind") == "main_task_ready":
@@ -1094,8 +1145,16 @@ async def _manager_report_context(ctx: Any) -> bool:
         )
 
     try:
-        humans = await asyncio.to_thread(_controller_json, "humans")
-        human_ids = {str(h.get("matrixUserID") or h.get("matrixUserId") or "") for h in humans.get("humans", [])}
+        if os.getenv("AGENTTEAMS_AGENT_ROLE") in {"leader", "team_leader"}:
+            team = await asyncio.to_thread(_controller_json, "teams/" + urllib.parse.quote(os.environ["AGENTTEAMS_TEAM_NAME"], safe=""))
+            admin = team.get("admin") or {}
+            admin_id = admin.get("matrixUserID") or admin.get("matrixUserId")
+            if not admin_id and admin.get("name") and own_id.startswith("@") and ":" in own_id:
+                admin_id = "@" + admin["name"] + ":" + own_id.split(":", 1)[1]
+            human_ids = {admin_id} if admin_id else set()
+        else:
+            humans = await asyncio.to_thread(_controller_json, "humans")
+            human_ids = {str(h.get("matrixUserID") or h.get("matrixUserId") or "") for h in humans.get("humans", [])}
         sources = _creation_sources.get()
         if sources is not None:
             current = [s for s in _receipt_module().creation_sources(meta) if s["userId"] in human_ids]
@@ -1115,6 +1174,14 @@ async def _manager_report_context(ctx: Any) -> bool:
                 ctx.extras.setdefault("requester_route_token", _requester_route.set({"channel": "matrix", "target_session": _room_id(ctx.request), "target_user": sender}))
             await _prepare_delivery_context(ctx)
             await _prepare_manager_roster(ctx)
+            if os.getenv("AGENTTEAMS_AGENT_ROLE") in {"leader", "team_leader"}:
+                _load_phase_skill(ctx, "task-management")
+                schemas = await ctx.agent.toolkit.get_tool_schemas()
+                for tool in schemas:
+                    if tool["function"]["name"].split("__")[-1].lower() in {"taskflow", "projectflow", "filesync"}:
+                        await ctx.agent.toolkit.remove_tool(tool["function"]["name"])
+                ctx.inject_context("Use the native Task tool to create the Task room, then end this intake turn. Plan only in that room.",
+                                   source="teamharness_leader_intake")
             return False
         event = meta.get("teamharness_workflow") or {}
         main_id = event.get("task_id") if event.get("type") == "MAIN_TASK_COMPLETED" else ""
@@ -1228,6 +1295,9 @@ def _register_coordination_hook(api: Any) -> None:
             token = ctx.extras.pop("source_event_token", None)
             if token is not None:
                 _source_event.reset(token)
+            token = ctx.extras.pop("native_actor_token", None)
+            if token is not None:
+                _native_actor.reset(token)
             token = ctx.extras.pop("handled_refresh_input_token", None)
             if token is not None:
                 _handled_refresh_input.reset(token)

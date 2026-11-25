@@ -58,7 +58,7 @@ class NativeTaskReceiptTest(unittest.TestCase):
                             self.assertEqual(observed[0]["_nativeSource"], {k: sources[1][k] for k in ("eventId", "userId", "roomId")})
                         self.assertEqual(middleware._finished_phase_receipt, "")
                         self.assertIn("[Task system receipt]", str(replies[0].content))
-                        self.assertIn('supplied input IDs: ["input-1"]', replies[0].content[0].text)
+                        self.assertIn('supplied input IDs: ["input-1"]', json.loads(replies[0].content[0].text)['fact'])
                         self.assertEqual(middleware._registered_inputs, {"$second"})
                 for input_id in (None, "input-unknown"):
                     called = []

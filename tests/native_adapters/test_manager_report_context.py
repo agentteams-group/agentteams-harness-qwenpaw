@@ -269,3 +269,50 @@ def test_verified_refresh_skips_queued_duplicates_without_skipping_new_inputs(mo
                 token = ctx.extras.pop(field,None)
                 if token is not None: variable.reset(token)
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_leader_intake_uses_only_own_team_admin_without_global_human_registry(monkeypatch, explicit):
+    spec = importlib.util.spec_from_file_location("leader_intake_plugin", SOURCE)
+    plugin = importlib.util.module_from_spec(spec); spec.loader.exec_module(plugin)
+    monkeypatch.setenv("AGENTTEAMS_AGENT_ROLE", "team_leader")
+    monkeypatch.setenv("AGENTTEAMS_TEAM_NAME", "own-team")
+    admin = {"name": "human", **({"matrixUserID": "@external:elsewhere"} if explicit else {})}
+    expected = "@external:elsewhere" if explicit else "@human:test"
+    reads = []
+    def read(route):
+        reads.append(route)
+        assert route == "teams/own-team", "A Leader cannot read the global Human registry"
+        return {"name": "own-team", "admin": admin}
+    monkeypatch.setattr(plugin, "_controller_json", read)
+    monkeypatch.setattr(plugin, "_prepare_delivery_context", AsyncMock())
+    monkeypatch.setattr(plugin, "_prepare_manager_roster", AsyncMock())
+    monkeypatch.setattr(plugin, "_load_phase_skill", lambda *args: None)
+    meta = {"event_id": "$request", "sender_id": expected, "room_id": "!source:test",
+            "agent_matrix_user_id": "@leader:test", "matrix_input_sources": [
+                {"event_id": "$peer", "sender_id": "@peer:test", "room_id": "!source:test"},
+                {"event_id": "$request", "sender_id": expected, "room_id": "!source:test"}]}
+    toolkit = SimpleNamespace(get_tool_schemas=AsyncMock(return_value=[
+        {"function": {"name": "teamharness__task"}}, {"function": {"name": "teamharness__taskflow"}},
+        {"function": {"name": "teamharness__projectflow"}}]), remove_tool=AsyncMock())
+    contexts = []
+    ctx = SimpleNamespace(request=SimpleNamespace(channel_meta=meta),
+        agent=SimpleNamespace(toolkit=toolkit), extras={},
+        inject_context=lambda text, **kwargs: contexts.append(text))
+    async def run():
+        try:
+            assert await plugin._manager_report_context(ctx) is False
+            sources = plugin._creation_sources.get()
+            assert len(sources) == 1 and sources[0]['userId'] == expected
+            assert sources[0]['eventId'] == '$request'
+            assert any(sources[0]['inputId'] in text for text in contexts)
+            assert [call.args[0] for call in toolkit.remove_tool.call_args_list] == [
+                'teamharness__taskflow', 'teamharness__projectflow']
+        finally:
+            for key, variable in [('creation_sources_token', plugin._creation_sources),
+                                  ('source_event_token', plugin._source_event),
+                                  ('requester_route_token', plugin._requester_route),
+                                  ('native_actor_token', plugin._native_actor)]:
+                if key in ctx.extras: variable.reset(ctx.extras.pop(key))
+    asyncio.run(run())
+    assert reads == ['teams/own-team']

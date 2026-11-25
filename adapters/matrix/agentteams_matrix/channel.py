@@ -2976,7 +2976,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         control = content.get("org.agentteams.coordination")
         meta = control.get("channel_meta", {}) if isinstance(control, dict) else {}
         assignment = meta.get("teamharness_coordination", {}) if isinstance(meta, dict) else {}
-        if isinstance(assignment, dict) and assignment.get("kind") == "assistant_digest":
+        if isinstance(assignment, dict) and assignment.get("kind") in {"assistant_digest", "handoff"}:
             await self._on_room_event(room, event)
 
     async def _on_room_event(
@@ -3035,7 +3035,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 "project_ready": "coordination-close:" + str(assignment.get("project_id", "")),
                 "main_task_ready": "coordination-close-task:" + str(assignment.get("main_task_id", "")),
             }.get(assignment.get("kind"))
-            if expected_session and assignment.get("main_task_id") and assignment.get("id"):
+            if (assignment.get("kind") in {"task_assigned", "task_submitted", "main_task_ready"}
+                    and expected_session and assignment.get("main_task_id") and assignment.get("id")):
                 expected_session += ":" + str(assignment["id"])
             if (expected_session is None
                     or control_meta.get("sender_id") != event.sender
@@ -3048,7 +3049,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         teamharness_self_trigger = None
         if sender_id == self._user_id:
             teamharness_self_trigger = self._teamharness_self_trigger(room_id, event)
-            if control is not None and assignment.get("kind") in {"assistant_digest", "task_assigned", "task_submitted", "project_ready", "main_task_ready"}:
+            if control is not None and assignment.get("kind") in {"assistant_digest", "handoff", "task_assigned", "task_submitted", "project_ready", "main_task_ready"}:
                 # The runtime hook verifies self-addressed execution/closure
                 # against the Controller receipt and current task before inference.
                 teamharness_self_trigger = {"type": "project_ready", "kind": "coordination"}
@@ -4020,6 +4021,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             )
             return True
         thread_meta = self._with_thread_relation_meta(meta_dict, thread_root)
+        thread_meta["org.agentteams.progress_only"] = True
         await self.send_content_parts(room_id, parts, thread_meta)
         return True
 
@@ -4074,6 +4076,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
         content: dict[str, Any] = {
             "msgtype": "m.notice",
             "body": "处理中...",
+            "org.agentteams.progress_only": True,
         }
         try:
             resp = await self._room_send_with_retry(
@@ -4110,6 +4113,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             return None
         content: dict[str, Any] = {
             "msgtype": "m.notice",
+            "org.agentteams.progress_only": True,
             "body": text,
             "format": "org.matrix.custom.html",
             "formatted_body": _md_to_html(text),
@@ -4390,7 +4394,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 explicit_user_ids=explicit_ids,
             )
         self._apply_thread_relation(content, meta_dict)
-        if meta_dict.get("teamharness_matrix_coordination"):
+        if msgtype == "m.notice" or meta_dict.get("org.agentteams.progress_only") or meta_dict.get("teamharness_matrix_coordination"):
             content["org.agentteams.progress_only"] = True
             content["m.mentions"] = {"user_ids": []}
         approval = meta_dict.get("org.agentteams.approval")

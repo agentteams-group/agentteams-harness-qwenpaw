@@ -314,9 +314,10 @@ def test_task_cli_receipt_is_injected_only_for_final_success_and_current_task(mo
         assert len(asyncio.run(run(command="cat result.json"))) == 1
         assert len(asyncio.run(run(command="agt task submit other --summary Done"))) == 1
         content = asyncio.run(run())
-        assert len(content) == 2 and "[Task system receipt]" in content[0].text
+        assert len(content) == 1 and "[Task system receipt]" in content[0].text
         assert "leader-a" in content[0].text and "Do not resend" in content[0].text
-        assert json.loads(content[1].text) == payload
+        compact = json.loads(content[0].text)
+        assert compact['task'] == payload['task'] and compact['phaseComplete'] is True
         assert len(asyncio.run(run())) == 1  # Same receipt, same current conversation.
     finally:
         module._execution_task.reset(token)
