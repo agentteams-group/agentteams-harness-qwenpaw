@@ -239,13 +239,15 @@ def test_coordination_short_circuit_uses_structured_keyword_message(monkeypatch)
         HookBase=object, HookResult=lambda **kwargs: SimpleNamespace(**kwargs),
         HookAction=SimpleNamespace(SHORT_CIRCUIT="short_circuit")))
     monkeypatch.setitem(sys.modules, "qwenpaw.runtime.phases", SimpleNamespace(
-        Phase=SimpleNamespace(PRE_EXECUTE="pre_execute", FINALLY="finally")))
+        Phase=SimpleNamespace(PRE_DISPATCH="pre_dispatch", PRE_EXECUTE="pre_execute", FINALLY="finally")))
     async def skip(_ctx): return True
     monkeypatch.setattr(module, "_manager_report_context", skip)
     api = FakeApi()
     module._register_coordination_hook(api)
-    assert api.calls[0][1][0].phase == "pre_execute"
-    result = asyncio.run(api.calls[0][1][0].run(object()))
+    manager_hook = next(call[1][0] for call in api.calls
+                        if call[0] == "register_runtime_hook" and call[1][0].name == "teamharness_manager_report")
+    assert manager_hook.phase == "pre_execute"
+    result = asyncio.run(manager_hook.run(object()))
     assert result.action == "short_circuit" and result.payload.role == "assistant"
 
 
