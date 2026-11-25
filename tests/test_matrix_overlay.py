@@ -431,6 +431,20 @@ def test_matrix_thread_parts_prefer_own_processing_root_over_incoming_root() -> 
     } == {"$sent1"}
 
 
+def test_completed_task_reasoning_is_a_finished_block_in_its_own_execution():
+    module, channel = _make_thread_channel()
+    meta = {"event_id": "$dispatch", "thread_root_event_id": "$previous-sender",
+            "task_execution": {"task_id": "node", "team_id": "team", "generation": 1}}
+    asyncio.run(channel.on_event_message_completed(None, "!room:hs.local",
+                SimpleNamespace(type="MessageType.REASONING", text="检查页面标题"), meta))
+    [(_, _, content, _)] = channel._client.sent
+    assert content["org.agentteams.run"]["blocks"] == [
+        {"type": "thinking", "content": "检查页面标题", "isStreaming": False}]
+    assert content["org.agentteams.run"]["run_id"] == "qwenpaw:task:team:node:1"
+    assert "m.relates_to" not in content
+    assert content["org.agentteams.progress_only"] is True
+
+
 def test_matrix_streaming_reasoning_waits_for_end_before_thread_item() -> None:
     module, channel = _make_thread_channel()
     meta = {"thread_root_event_id": "$incoming"}

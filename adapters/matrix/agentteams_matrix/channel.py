@@ -4144,19 +4144,9 @@ class AgentTeamsMatrixChannel(BaseChannel):
         )
         if not self._client or not (thread_root or send_meta.get("org.agentteams.run_id")):
             return None
-        content: dict[str, Any] = {
-            "msgtype": "m.notice",
-            "org.agentteams.progress_only": True,
-            "body": text,
-            "format": "org.matrix.custom.html",
-            "formatted_body": _md_to_html(text),
-        }
-        if send_meta.get("org.agentteams.run_id"):
-            content["org.agentteams.run_id"] = send_meta["org.agentteams.run_id"]
-        self._apply_thread_relation(
-            content,
-            self._with_thread_relation_meta(send_meta, thread_root),
-        )
+        meta = self._with_thread_relation_meta(send_meta, thread_root)
+        meta["_matrix_completed_reasoning"] = True
+        content = self._matrix_text_content(to_handle, text, meta, "m.notice")
         try:
             resp = await self._room_send_with_retry(
                 to_handle,
@@ -4424,7 +4414,10 @@ class AgentTeamsMatrixChannel(BaseChannel):
         meta_dict = meta if isinstance(meta, dict) else {}
         if run_id := meta_dict.get("org.agentteams.run_id"):
             content["org.agentteams.run_id"] = run_id
-            if msgtype == "m.text" and _is_task_coordination(meta_dict) and not meta_dict.get("org.agentteams.approval"):
+            if msgtype == "m.notice" and meta_dict.get("_matrix_completed_reasoning"):
+                content["org.agentteams.run"] = {"version": "1", "run_id": run_id, "blocks": [
+                    {"type": "thinking", "content": text.removeprefix("Thinking:\n\n"), "isStreaming": False}]}
+            elif msgtype == "m.text" and _is_task_coordination(meta_dict) and not meta_dict.get("org.agentteams.approval"):
                 content["org.agentteams.run"] = {"version": "1", "run_id": run_id,
                                                 "blocks": [{"type": "text", "text": text}]}
         sender_id = meta_dict.get("sender_id") or meta_dict.get("user_id")
@@ -4436,7 +4429,10 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 room_id,
                 explicit_user_ids=explicit_ids,
             )
-        self._apply_thread_relation(content, meta_dict)
+        # A dispatched worker owns its run. Its progress is not a thread reply to the previous worker.
+        if not (meta_dict.get("_matrix_completed_reasoning") and
+                (meta_dict.get("task_execution") or meta_dict.get("message_execution") or _is_task_coordination(meta_dict))):
+            self._apply_thread_relation(content, meta_dict)
         if msgtype == "m.notice" or meta_dict.get("org.agentteams.progress_only") or meta_dict.get("teamharness_matrix_coordination"):
             content["org.agentteams.progress_only"] = True
             content["m.mentions"] = {"user_ids": []}
@@ -4867,13 +4863,12 @@ class AgentTeamsMatrixChannel(BaseChannel):
             if not parts:
                 return
             if self._is_reasoning_message(message_type):
-                send_meta[_MATRIX_FORCE_NOTICE_KEY] = True
+                send_meta = {**send_meta, _MATRIX_FORCE_NOTICE_KEY: True, "_matrix_completed_reasoning": True}
             await self._send_or_queue_thread_parts(
                 to_handle,
                 parts,
                 send_meta,
             )
-            send_meta.pop(_MATRIX_FORCE_NOTICE_KEY, None)
             return
         if self._is_tool_output_message(message_type):
             send_meta[_MATRIX_TURN_TOOL_ACTIVITY_KEY] = True
