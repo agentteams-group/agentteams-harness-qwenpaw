@@ -438,13 +438,27 @@ class FileSync:
         for rel in sorted(protected):
             exclude_args.extend(("--exclude", rel))
         try:
-            self._mc(
-                "mirror",
-                remote,
-                str(local_dir) + "/",
-                "--overwrite",
-                *exclude_args,
-            )
+            for attempt in range(3):
+                try:
+                    self._mc(
+                        "mirror",
+                        remote,
+                        str(local_dir) + "/",
+                        "--overwrite",
+                        *exclude_args,
+                    )
+                    break
+                except subprocess.CalledProcessError as exc:
+                    if (
+                        "Input reader closed pre-maturely" not in _to_text(exc.stderr)
+                        or attempt == 2
+                    ):
+                        raise
+                    logger.warning(
+                        "storage mirror short read; retrying component=sync worker=%s attempt=%s",
+                        self.worker_name, attempt + 2,
+                    )
+                    time.sleep(1)
         except subprocess.CalledProcessError as exc:
             if _looks_like_missing_object_error(exc.stderr):
                 logger.info("storage prefix is empty component=sync remote=%s", remote)
