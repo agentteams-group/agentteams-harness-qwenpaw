@@ -162,21 +162,49 @@ def test_link_workspace_shared_points_to_canonical_shared(tmp_path: Path) -> Non
     assert (config.shared_dir / "tasks" / "task-1" / "workspace" / "note.txt").read_text(encoding="utf-8") == "ready\n"
 
 
-def test_sync_managed_skills_targets_native_qwenpaw_workspace(tmp_path: Path) -> None:
+def test_managed_skill_refresh_uses_complete_package_content(tmp_path: Path) -> None:
     config = _config(tmp_path)
     worker = Worker(config)
-    mirrored: list[tuple[str, Path]] = []
+    target = config.default_workspace_dir / "skills" / "competition-skill"
+    files = {"SKILL.md": "version one", "old.md": "retired", "guide.md": "one"}
+
+    def mirror(prefix, local_dir):
+        assert prefix == "agents/worker-a/skills/competition-skill"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items():
+            path = local_dir / name
+            # An mc overwrite mirror can skip equal-length objects.
+            if not path.exists() or path.stat().st_size != len(content):
+                path.write_text(content)
+
     worker.sync = types.SimpleNamespace(
         remote_prefix="agents/worker-a",
-        mirror_prefix=lambda prefix, local_dir: mirrored.append((prefix, local_dir)),
+        mirror_prefix=mirror,
     )
-
     worker._sync_managed_skills(["competition-skill"])
+    assert (target / "SKILL.md").read_text() == "version one"
 
-    assert mirrored == [(
-        "agents/worker-a/skills/competition-skill",
-        config.default_workspace_dir / "skills" / "competition-skill",
-    )]
+    files["SKILL.md"] = "version two"
+    del files["old.md"]
+    worker._sync_managed_skills(["competition-skill"])
+    assert (target / "SKILL.md").read_text() == "version two"
+    assert not (target / "old.md").exists()
+    files["guide.md"] = "two"
+    worker._sync_managed_skills(["competition-skill"])
+    assert (target / "guide.md").read_text() == "two"
+    inode = target.stat().st_ino
+    worker._sync_managed_skills(["competition-skill"])
+    assert target.stat().st_ino == inode
+
+    def partial_download(prefix, local_dir):
+        (local_dir / "guide.md").write_text("incomplete")
+        raise RuntimeError("download failed")
+
+    worker.sync.mirror_prefix = partial_download
+    with pytest.raises(RuntimeError, match="download failed"):
+        worker._sync_managed_skills(["competition-skill"])
+    assert target.stat().st_ino == inode
+    assert (target / "guide.md").read_text() == "two"
 
 
 def test_runtime_storage_change_relinks_shared_and_refreshes_builtin_mcp(

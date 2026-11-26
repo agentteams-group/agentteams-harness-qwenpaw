@@ -22,7 +22,7 @@ from qwenpaw_worker.config import WorkerConfig, _relative_storage_prefix
 from qwenpaw_worker.heartbeat import WorkerHeartbeat, run_worker_heartbeat_loop
 from qwenpaw_worker.log import configure_worker_logging
 from qwenpaw_worker.sync import FileSync, push_loop
-from qwenpaw_worker.update import MemberRuntimeConfig, RuntimeUpdater
+from qwenpaw_worker.update import MemberRuntimeConfig, RuntimeUpdater, skill_tree_digest
 
 logger = logging.getLogger(__name__)
 try:
@@ -650,10 +650,32 @@ class Worker:
         for name in skill_names:
             if not name or name in {".", ".."} or "/" in name or "\\" in name:
                 raise ValueError(f"invalid assigned skill name: {name!r}")
-            self.sync.mirror_prefix(
-                f"{self.sync.remote_prefix}/skills/{name}",
-                self.config.default_workspace_dir / "skills" / name,
-            )
+            workspace = self.config.default_workspace_dir
+            target = workspace / "skills" / name
+            cache = workspace / ".cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="managed-skill-", dir=cache) as tmp:
+                # An empty destination forces mc to fetch even equal-size revisions.
+                staged = Path(tmp) / "incoming"
+                staged.mkdir()
+                self.sync.mirror_prefix(f"{self.sync.remote_prefix}/skills/{name}", staged)
+                if not any(staged.iterdir()):
+                    # A named native skill can exist without a storage projection.
+                    continue
+                if not (staged / "SKILL.md").is_file():
+                    raise ValueError(f"assigned skill {name!r} is missing SKILL.md")
+                if target.is_dir() and not target.is_symlink() and skill_tree_digest(target) == skill_tree_digest(staged):
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                previous = Path(tmp) / "previous"
+                if target.exists() or target.is_symlink():
+                    target.rename(previous)
+                try:
+                    staged.rename(target)
+                except OSError:
+                    if previous.exists() or previous.is_symlink():
+                        previous.rename(target)
+                    raise
 
     def _runtime_shared_prefix(self, runtime_config) -> str:
         storage = getattr(runtime_config, "storage", {}) or {}

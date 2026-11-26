@@ -888,6 +888,7 @@ def _skip_background_push(rel: Path) -> bool:
     excluded_prefixes = (
         "credentials",
         "runtime",
+        "skills",  # Controller-distributed packages mirrored into the native workspace.
         "shared",
         "global-shared",
         ".qwenpaw/workspaces/default/shared",

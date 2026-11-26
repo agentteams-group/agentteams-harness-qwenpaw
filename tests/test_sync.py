@@ -1088,6 +1088,36 @@ class _FlushFakeRemote:
         return self.objects.get(self.full(key))
 
 
+@pytest.mark.parametrize("shutdown", [False, True], ids=["background", "shutdown"])
+def test_worker_sync_preserves_published_skill_package(tmp_path: Path, monkeypatch, shutdown: bool) -> None:
+    sync = _sync(tmp_path)
+    remote = _FlushFakeRemote()
+    monkeypatch.setattr(sync, "ensure_alias", lambda: None)
+    monkeypatch.setattr(sync, "_mc", remote.mc)
+    monkeypatch.setattr(sync, "_cat_bytes", remote.cat)
+
+    source = "skills/release/"
+    native = ".qwenpaw/workspaces/default/skills/release/notes.md"
+    for rel in (source + "guide.md", source + "old.md", native):
+        path = sync.local_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"local")
+    prefix = remote.full(sync.remote_prefix + "/")
+    remote.objects[prefix + source + "guide.md"] = b"newer"
+    remote.objects[prefix + source + "new.md"] = b"added"
+
+    if shutdown:
+        assert sync.flush()["ok"]
+    else:
+        push_local(sync)
+
+    assert remote.objects == {
+        prefix + source + "guide.md": b"newer",
+        prefix + source + "new.md": b"added",
+        prefix + native: b"local",
+    }
+
+
 def test_flush_returns_per_file_receipts(tmp_path: Path, monkeypatch) -> None:
     sync = _sync(tmp_path)
     sync.local_dir.mkdir(parents=True)

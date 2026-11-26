@@ -133,6 +133,19 @@ def _duration_ms(started_at: float) -> int:
     return max(0, int((time.monotonic() - started_at) * 1000))
 
 
+def skill_tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        if path.is_symlink():
+            digest.update(b"link\0" + os.fsencode(os.readlink(path)) + b"\0")
+        elif path.is_file():
+            digest.update(b"file\0" + hashlib.sha256(path.read_bytes()).digest())
+        else:
+            digest.update(b"dir\0")
+    return digest.hexdigest()
+
+
 def _strip_json_line_comments(text: str) -> str:
     result: List[str] = []
     in_string = False
@@ -1189,16 +1202,7 @@ class AgentPackageManager:
         skills_dir = self._package_content_root(package_dir) / "skills"
         if not skills_dir.is_dir():
             return ""
-        digest = hashlib.sha256()
-        for path in sorted(skills_dir.rglob("*")):
-            relative = path.relative_to(skills_dir).as_posix()
-            digest.update(relative.encode("utf-8"))
-            if path.is_file():
-                digest.update(b"\0file\0")
-                digest.update(path.read_bytes())
-            elif path.is_dir():
-                digest.update(b"\0dir\0")
-        return digest.hexdigest()
+        return skill_tree_digest(skills_dir)
 
     def _qwenpaw_mcp_client_payload(self, name: str, item: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(item)

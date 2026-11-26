@@ -36,6 +36,13 @@ including sensitive-file and catastrophic-command checks, remain enforced.
 This policy does not disable the ToolGuard or grant all shell commands.
 
 - Restore worker and shared files from object storage on startup.
+- When applying an assigned Skill, fetch its complete package from
+  `agents/{memberName}/skills/{skillName}/` and compare its paths and content
+  with the native workspace copy. Identical packages keep their existing files.
+  A changed package replaces that Skill directory before QwenPaw enables it.
+  If the download fails, the previous copy remains available.
+  Background sync and shutdown flush treat the top-level `skills/` mirror as
+  read-only. Edits in the native workspace still sync to its own storage path.
 - Persist eligible local runtime changes back to object storage.
 - Exclude credentials, shared projections, logs, tool results,
   media, file store, and other runtime cache paths from background push.
