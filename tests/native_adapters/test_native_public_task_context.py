@@ -94,6 +94,7 @@ class NativePublicContextTest(unittest.TestCase):
                 elif kind == "main_task_ready": self.assertEqual(plugin._completion_task.get(), "main")
                 else:
                     self.assertEqual(plugin._planning_tasks.get(), frozenset({"main"}))
+                    self.assertTrue(any("overview" in text and "验收标准" in text for text in texts))
                     self.assertTrue(any("domain Skills" in text and "Skill" in text for text in texts))
                     viewed = [item async for item in toolkit.call_tool(
                         ToolCallBlock(id="domain-rule", name="Skill", input=json.dumps({"skill": "domain-delivery"})), agent.state)]
