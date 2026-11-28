@@ -27,6 +27,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import httpx
 
 
+class NativeIterationLimit(RuntimeError):
+    """The native SDK closed an assigned Task at its iteration budget."""
+
+
+
 from nio import (
     AsyncClient,
     KeysUploadResponse,
@@ -440,7 +445,8 @@ class _LegacySyncTokenStore:
 
 def _run_id(room, event=None, task=None):
     if task:
-        return f"qwenpaw:task:{task['team_id']}:{task['task_id']}:{task['generation']}"
+        from runtime_control import task_run_id
+        return task_run_id(task['team_id'], task['task_id'], task['generation'])
     return f"qwenpaw:message:{room}:{event}"
 
 
@@ -748,6 +754,25 @@ class AgentTeamsMatrixChannel(BaseChannel):
             yield item
 
     async def _stream_matrix_payload(self, payload: Any):
+        meta = payload.get('meta', {}) if isinstance(payload, dict) else {}
+        run_id = meta.get('org.agentteams.run_id') or _run_id(meta.get('room_id'), meta.get('event_id'), meta.get('task_execution'))
+        kind = 'failed'
+        try:
+            async for item in self._stream_matrix_payload_native(payload):
+                yield item
+            kind = 'quiet'
+        except asyncio.CancelledError:
+            kind = 'cancelled'
+            raise
+        finally:
+            display = getattr(self, '_native_progress_by_run', {}).pop(run_id, None)
+            if display:
+                try:
+                    await display.finish(kind)
+                except Exception:
+                    logger.exception('Matrix native progress closure failed')
+
+    async def _stream_matrix_payload_native(self, payload: Any):
         meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
         if meta.get("task_execution"):
             async for item in self._stream_recovered_task(payload):
@@ -818,9 +843,16 @@ class AgentTeamsMatrixChannel(BaseChannel):
             guard = asyncio.create_task(monitor())
             stream = super()._stream_with_tracker(payload)
             interrupted = False
+            retry_transport = False
+            iteration_limit = False
             try:
                 async for item in stream:
                     yield item
+            except (httpx.TransportError, NativeIterationLimit) as exc:
+                interrupted = True
+                retry_transport = True
+                iteration_limit = isinstance(exc, NativeIterationLimit)
+                raise
             except BaseException:
                 interrupted = True
                 raise
@@ -828,6 +860,14 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 guard.cancel()
                 await asyncio.gather(guard, return_exceptions=True)
                 await stream.aclose()
+                if retry_transport:
+                    try:
+                        if iteration_limit:
+                            await self._task_execution.retry_failed(identity, iteration_limit=True)
+                        else:
+                            await self._task_execution.retry_failed(identity)
+                    except (RecoveryConflict, RecoveryUnavailable):
+                        logger.warning("Failed Task retry deferred; retain authoritative progress")
                 if interrupted:
                     try:
                         await asyncio.to_thread(self._task_execution.recovery.interrupted,
@@ -891,6 +931,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
         if turn:
             identity = turn["identity"]
             meta.update(message_execution=identity, message_session_id=turn["session_id"])
+            if turn.get('task_context'):
+                meta['task_continuation'] = turn['task_context']
             if turn.get("history"):
                 payload["content_parts"].insert(0, TextContent(type=ContentType.TEXT, text=turn["history"]))
             if turn["resume_text"]:
@@ -1452,7 +1494,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             enabled = lambda: False
         if enabled():
             from .task_execution import TaskExecution
-            from qwenpaw_matrix_sync import ManagedNioSync
+            from agentteams_matrix.managed_sync import ManagedNioSync
 
             self._task_execution = TaskExecution(self)
             self._managed_sync = ManagedNioSync(self, self._task_execution)
@@ -2540,6 +2582,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
         Delivered by matrix-nio after Megolm decrypt. File bytes are still
         AES-encrypted; download + decrypt with key/iv/hashes from the event.
         """
+        if self._session_receipts and await self._session_receipts.was_completed(room.room_id, event.event_id):
+            return
         if event.sender == self._user_id:
             return
 
@@ -2734,6 +2778,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             if self._task_execution:
                 key = input_key or await self._task_execution.accept_input(room_id, event, "message")
                 payload["meta"]["shared_input_keys"] = [key]
+                if await self._task_execution.supplement(room_id, event, key):
+                    return
             self._enqueue_matrix_input(payload, turn)
             if not is_dm:
                 self._clear_history(room_id)
@@ -3015,6 +3061,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
         *,
         prepare=None, input_key=None, turn=None,
     ):
+        if self._session_receipts and await self._session_receipts.was_completed(room.room_id, event.event_id):
+            return
         if (getattr(event, "source", {}) or {}).get("content", {}).get("org.agentteams.progress_only") is True:
             return
         content = (getattr(event, "source", {}) or {}).get("content", {})
@@ -3334,6 +3382,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             if self._task_execution:
                 key = input_key or await self._task_execution.accept_input(room_id, event, intent)
                 payload["meta"]["shared_input_keys"] = [key]
+                if await self._task_execution.supplement(room_id, event, key):
+                    return
             if await self._handle_direct_control(payload, event):
                 if turn:
                     await asyncio.to_thread(self._task_execution.matrix.message_cancel, turn["identity"])
@@ -3353,6 +3403,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
 
     # pylint: disable=too-many-branches,too-many-statements
     async def _on_room_media_event(self, room: MatrixRoom, event: Any, *, prepare=None, input_key=None, turn=None):
+        if self._session_receipts and await self._session_receipts.was_completed(room.room_id, event.event_id):
+            return
         """Handle incoming media messages (image, file, audio, video)."""
         if (getattr(event, "source", {}) or {}).get("content", {}).get("org.agentteams.progress_only") is True:
             return
@@ -3531,6 +3583,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
             if self._task_execution:
                 key = input_key or await self._task_execution.accept_input(room_id, event, "message")
                 payload["meta"]["shared_input_keys"] = [key]
+                if await self._task_execution.supplement(room_id, event, key):
+                    return
             self._enqueue_matrix_input(payload, turn)
             if not is_dm and not is_thread_event:
                 self._clear_history(room_id)
@@ -4190,9 +4244,10 @@ class AgentTeamsMatrixChannel(BaseChannel):
             "m.new_content": new_content,
             "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
         }
-        if progress_only:
-            content["org.agentteams.progress_only"] = True
-            new_content["org.agentteams.progress_only"] = True
+        # A final edit must clear the placeholder's process marker explicitly;
+        # clients preserve routing metadata while applying replacements.
+        content["org.agentteams.progress_only"] = progress_only
+        new_content["org.agentteams.progress_only"] = progress_only
         # Propagate m.mentions to the outer event — MSC3952 requires it on
         # the replacement event for notification delivery.
         if "m.mentions" in new_content:
@@ -4704,6 +4759,10 @@ class AgentTeamsMatrixChannel(BaseChannel):
         return renderer.message_to_parts(event)
 
     def _text_from_message_event(self, event: Any) -> str:
+        # Native reasoning envelopes can be empty when the provider does not
+        # expose reasoning text. Do not turn the renderer's fallback into chat.
+        if self._is_reasoning_message(getattr(event, "type", None)):
+            return "\n".join(getattr(part, "text", "") or "" for part in event.content).strip()
         parts = self._message_to_content_parts(event)
         return "\n".join(
             getattr(p, "text", "") or getattr(p, "refusal", "") or ""
@@ -4811,6 +4870,9 @@ class AgentTeamsMatrixChannel(BaseChannel):
         send_meta: Dict[str, Any],
     ) -> None:
         """Route completed messages behind a processing root."""
+        if (send_meta.get("task_execution") and
+                (getattr(event, "metadata", None) or {}).get("org.agentteams.native_stop") == "exceed_max_iters"):
+            raise NativeIterationLimit("Native Task iteration budget exhausted")
         if _is_assistant_turn(send_meta):
             return
         del request
@@ -4839,6 +4901,9 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 async def send(content):
                     return await self._room_send_with_retry(to_handle, "m.room.message", content)
                 display = send_meta["_matrix_native_progress"] = MatrixProgress(send, send_meta["org.agentteams.run_id"])
+                if not hasattr(self, '_native_progress_by_run'):
+                    self._native_progress_by_run = {}
+                self._native_progress_by_run[display.run_id] = display
             try:
                 await display.tool(event, finished=self._is_tool_output_message(message_type))
             except Exception:
@@ -4852,6 +4917,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
         if self._is_reasoning_message(
             message_type,
         ) or self._is_tool_call_message(message_type):
+            if self._is_reasoning_message(message_type) and not self._text_from_message_event(event):
+                return
             if self._is_tool_call_message(message_type):
                 send_meta[_MATRIX_TURN_TOOL_ACTIVITY_KEY] = True
             await self._ensure_thread_root(to_handle, send_meta)
@@ -5238,7 +5305,7 @@ class AgentTeamsMatrixChannel(BaseChannel):
             await self._send_typing(to_handle, False)
             return
         display = send_meta.pop("_matrix_native_progress", None)
-        if display is not None and not (send_meta.get("message_execution") or send_meta.get("task_execution") or _is_task_coordination(send_meta)):
+        if display is not None and not (send_meta.get('message_execution') or send_meta.get('task_execution')):
             try:
                 await display.finish()
             except Exception:
@@ -5252,6 +5319,8 @@ class AgentTeamsMatrixChannel(BaseChannel):
                 await self._task_execution.messages.finish(send_meta["message_execution"], text)
             else:
                 await self._task_execution.finish(send_meta["task_execution"], request.session_id, text)
+            if display is not None:
+                await display.finish()
             await self._send_typing(to_handle, False)
             return
         gate_action, gate_new_count = self._evaluate_send_gate(send_meta, to_handle)

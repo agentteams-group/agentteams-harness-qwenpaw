@@ -436,11 +436,11 @@ def test_completed_task_reasoning_is_a_finished_block_in_its_own_execution():
     meta = {"event_id": "$dispatch", "thread_root_event_id": "$previous-sender",
             "task_execution": {"task_id": "node", "team_id": "team", "generation": 1}}
     asyncio.run(channel.on_event_message_completed(None, "!room:hs.local",
-                SimpleNamespace(type="MessageType.REASONING", text="检查页面标题"), meta))
+                SimpleNamespace(type="MessageType.REASONING", text="检查页面标题", content=[SimpleNamespace(text="检查页面标题")]), meta))
     [(_, _, content, _)] = channel._client.sent
     assert content["org.agentteams.run"]["blocks"] == [
         {"type": "thinking", "content": "检查页面标题", "isStreaming": False}]
-    assert content["org.agentteams.run"]["run_id"] == "qwenpaw:task:team:node:1"
+    assert content["org.agentteams.run"]["run_id"] == "task:team:node:1"
     assert "m.relates_to" not in content
     assert content["org.agentteams.progress_only"] is True
 

@@ -397,6 +397,7 @@ class MemberRuntimeConfig:
             _stable_json(self.inline_config),
             _stable_json(self.model),
             _stable_json(self.subagent_model),
+            _stable_json(self.desired.get("approvalMode")),
             _stable_json(self.mcp_servers),
             _stable_json(self.channels),
             _stable_json(self.channel_policy),
@@ -1334,6 +1335,7 @@ class RuntimeUpdater:
         self._applied_agent_package_dir: Optional[Path] = None
         self._package_mcp_clients: Dict[str, Dict[str, Any]] = {}
         self._applied_mcp_client_identities: Dict[str, str] = {}
+        self._pending_mcp_activations: Dict[str, Tuple[Dict[str, Any], float]] = {}
         self._applied_package_skills_identity: Optional[str] = None
         self._applied_managed_skills_identity: Optional[str] = None
         self._applied_inline_config_identity: Optional[str] = None
@@ -1366,6 +1368,7 @@ class RuntimeUpdater:
             or bool(self.skill_warnings)
         )
         if not changed:
+            self._retry_mcp_activations()
             logger.info(
                 "runtime config apply skipped component=update worker=%s generation=%s changed=%s "
                 "mcp_server_count=%s channel_names=%s credential_binding_count=%s duration_ms=%s",
@@ -1543,6 +1546,12 @@ class RuntimeUpdater:
                 self.adapter_apply()
             adapter_applied = True
 
+        from runtime_control import approval_mode
+        mode = approval_mode(config.raw)
+        if mode:
+            if self.api_client is None:
+                raise RuntimeError("QwenPaw API client is required for Agent approval configuration")
+            self.api_client.configure_agent("default", {"approval_level": "OFF" if mode == "allow" else "AUTO"})
         self.current_config = config
         logger.info(
             "runtime config apply complete component=update worker=%s generation=%s changed=%s "
@@ -1770,8 +1779,8 @@ class RuntimeUpdater:
                 model.get("providerName") or model.get("provider_name") or provider_id
             ),
             "chat_model": _string(
-                model.get("chatModel") or model.get("chat_model") or "OpenAIChatModel"
-            ),
+                model.get("chatModel") or model.get("chat_model") or os.getenv("QWENPAW_CHAT_MODEL")
+            ) or None,
             "supports_image": supports_image_val,
             "supports_video": supports_video_val,
             "supports_multimodal": supports_multimodal_val,
@@ -1889,12 +1898,40 @@ class RuntimeUpdater:
             identity = self._component_identity(payload)
             if key not in existing:
                 self.api_client.create_mcp(key, payload)
+                self._pending_mcp_activations[key] = (payload, time.monotonic())
             elif force or self._applied_mcp_client_identities.get(key) != identity:
                 self.api_client.update_mcp(key, payload)
+                self._pending_mcp_activations[key] = (payload, time.monotonic())
+            if key in direct_servers and isinstance(config.mcp_servers, list):
+                from runtime_control import mcp_approval
+
+                mode = mcp_approval(config.raw, key)
+                self.api_client.put_mcp_policy(key, {
+                    "default_effect": mode or "ask",
+                    "client_overrides": [], "tool_defaults": [], "tool_overrides": [],
+                })
             next_identities[key] = identity
+        self._pending_mcp_activations = {key: value for key, value in self._pending_mcp_activations.items()
+                                         if key in desired and desired[key].get("enabled", True)}
+        self._retry_mcp_activations()
         self._applied_mcp_client_identities = next_identities
         self._write_managed_mcp_keys(direct_ownership_path, direct_servers)
         self._write_managed_mcp_keys(package_ownership_path, package_servers)
+
+    def _retry_mcp_activations(self) -> None:
+        # Native saves activate asynchronously. A failed first connection stays
+        # inactive even after the gateway recovers; reload only that saved client.
+        for key, (payload, attempted_at) in list(self._pending_mcp_activations.items()):
+            try:
+                self.api_client.list_mcp_tools(key)
+            except QwenPawApiError as exc:
+                # Allow the native background activation its normal startup window.
+                if "status=inactive" in str(exc) and time.monotonic() - attempted_at >= 60:
+                    self._pending_mcp_activations[key] = (payload, time.monotonic())
+                    self.api_client.update_mcp(key, payload)
+                    logger.info("Retrying native MCP activation component=update client=%s", key)
+            else:
+                self._pending_mcp_activations.pop(key, None)
 
     def _direct_mcp_clients(self, config: MemberRuntimeConfig) -> Dict[str, Dict[str, Any]]:
         clients: Dict[str, Dict[str, Any]] = {}

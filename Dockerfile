@@ -189,6 +189,7 @@ COPY --from=agentteams manager/scripts/init/qwenpaw_manager_skill_sync.py /opt/a
 COPY --chmod=755 scripts/qwenpaw-worker-entrypoint.sh /opt/agentteams/scripts/qwenpaw-worker-entrypoint.sh
 COPY --chmod=755 scripts/qwenpaw-teamharness-plugin-reload.sh /opt/agentteams/scripts/qwenpaw-teamharness-plugin-reload.sh
 COPY --from=shared . /opt/agentteams/scripts/lib/
+COPY telemetry/at_native_telemetry.py /opt/agentteams/scripts/lib/telemetry/at_native_telemetry.py
 COPY adapters/teamharness/task_trace.py /opt/agentteams/scripts/lib/telemetry/at_task_trace.py
 RUN /opt/venv/qwenpaw/bin/pip install --index-url "${PIP_INDEX_URL}" \
     -r /opt/agentteams/scripts/lib/telemetry/requirements.txt
@@ -207,6 +208,7 @@ RUN chmod +x /opt/agentteams/scripts/lib/mc-wrapper.sh && \
 # not carry the fix). The build-time run below applies it for the 2.2.2.post1 image.
 COPY scripts/patch-qwenpaw-driver-policy-reload.py /opt/agentteams/scripts/patch-qwenpaw-driver-policy-reload.py
 COPY scripts/patch-qwenpaw-matrix-cron-final.py /opt/agentteams/scripts/patch-qwenpaw-matrix-cron-final.py
+COPY scripts/patch-qwenpaw-startup-discovery.py /opt/agentteams/scripts/patch-qwenpaw-startup-discovery.py
 COPY scripts/patch-qwenpaw-private-cleanup.py /opt/agentteams/scripts/patch-qwenpaw-private-cleanup.py
 # In-place runtime upgrade: two-phase orchestrator + checker CLI, kept next to
 # the patch script so the orchestrator's `$(dirname $0)` resolution finds both
@@ -214,7 +216,8 @@ COPY scripts/patch-qwenpaw-private-cleanup.py /opt/agentteams/scripts/patch-qwen
 COPY --chmod=755 scripts/upgrade_qwenpaw_runtime.sh /opt/agentteams/scripts/upgrade_qwenpaw_runtime.sh
 COPY --chmod=755 scripts/check_qwenpaw_upgrade.py /opt/agentteams/scripts/check_qwenpaw_upgrade.py
 COPY tests/check_driver_policy_reload.py /tmp/check_driver_policy_reload.py
-RUN /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-driver-policy-reload.py && \
+RUN /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-startup-discovery.py && \
+    /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-driver-policy-reload.py && \
     /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-matrix-cron-final.py && \
     /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-private-cleanup.py && \
     /opt/venv/qwenpaw/bin/python /tmp/check_driver_policy_reload.py && \

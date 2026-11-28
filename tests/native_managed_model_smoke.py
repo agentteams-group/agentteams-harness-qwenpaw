@@ -46,6 +46,14 @@ with tempfile.TemporaryDirectory() as directory:
             # runner. Catalog.calls independently checks for remote discovery.
             client = Client(endpoint)
             result = client.configure_active_model("managed-fixture", "qwen3.6-plus", base_url="http://127.0.0.1:" + str(gateway.server_port) + "/v1", api_key="fixture-no-model-call", supports_image=True, supports_video=False)
+            response_model = "managed-responses-fixture"
+            client.configure_active_model("managed-responses", response_model,
+                base_url="http://127.0.0.1:" + str(gateway.server_port) + "/v1",
+                api_key="fixture-no-model-call", chat_model="OpenAIResponseModel")
+            # A second managed refresh must retain the selected native protocol.
+            client.configure_active_model("managed-responses", response_model)
+            providers = client._request("GET", "/api/models")
+            assert next(p for p in providers if p["id"] == "managed-responses")["chat_model"] == "OpenAIResponseModel"
             # Background discovery would otherwise start after returning config.
             time.sleep(0.5)
             assert not Catalog.calls, Catalog.calls

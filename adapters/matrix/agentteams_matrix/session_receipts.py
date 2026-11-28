@@ -99,6 +99,10 @@ class SessionReceipts:
             await asyncio.to_thread(self._manager_outbox.enqueue, room_id, event_id, "completed", trace_context=trace_context)
             self.wakeup.set()
 
+    async def was_completed(self, room_id, event_id):
+        return bool(self._manager_outbox and await asyncio.to_thread(
+            self._manager_outbox.was_completed, room_id, event_id))
+
     async def flush(self):
         async with self.flush_lock:
             await self._flush()
@@ -254,12 +258,14 @@ class SessionReceiptMiddleware(MiddlewareBase):
                 yield ToolResponse(state="error", content=[TextBlock(
                     text="浏览器脚本尚未执行。请删除 Browser SDK 的 import 语句，直接使用 await Browser.connect()。")])
                 return
-            from qwenpaw_message_execution import guarded_tool, read_only_registration
-            binding = self.ctx.extras.get('agentteams_task_registration')
-            registration = await binding(agent, call) if binding else None
-            read_only = call.name == "read_file" and await read_only_registration(agent, call)
+            from agentteams_matrix.message_execution import guarded_tool, read_only_registration, canonical_registration, driver_registration, native_shell_registration
+            server_path = self.ctx.extras.get('agentteams_task_server_path')
+            registration = await canonical_registration(agent, call, server_path) if server_path else None
+            read_only = await read_only_registration(agent, call)
             stream = guarded_tool(*managed, call, next_handler, input_kwargs,
-                                  registration=registration, read_only=read_only)
+                                  registration=registration, read_only=read_only,
+                                  driver_name=await driver_registration(agent, call),
+                                  native_shell=await native_shell_registration(agent, call))
         else:
             stream = next_handler(**input_kwargs)
         async for item in stream:

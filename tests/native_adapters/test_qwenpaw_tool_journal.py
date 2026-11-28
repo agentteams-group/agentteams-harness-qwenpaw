@@ -21,7 +21,7 @@ import mcp.types
 
 ROOT = core_source()
 sys.path.insert(0, str(ROOT / 'shared/lib'))
-from qwenpaw_message_execution import canonical_registration
+from agentteams_matrix.message_execution import canonical_registration
 from task_recovery import Recovery, RecoveryConflict
 
 
@@ -65,7 +65,8 @@ def test_task_owned_tool_checkpoints_before_effect_and_after_complete_stream(out
         yield ToolResponse(state='error' if outcome == 'error' else 'success', content=[TextBlock(text='saved')])
         if outcome == 'late_timeout':
             raise TimeoutError('stream finalization failed')
-    agent = SimpleNamespace(_acting_middlewares=[middleware(ctx)], _acting_impl=invoke)
+    agent = SimpleNamespace(_acting_middlewares=[middleware(ctx)], _acting_impl=invoke,
+                            toolkit=SimpleNamespace(get_tool=AsyncMock(return_value=None)))
     async def scenario():
         if outcome == 'success':
             results = [item async for item in Agent._acting(agent, call)]

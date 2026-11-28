@@ -9,8 +9,8 @@ from uuid import uuid4
 from task_recovery import Recovery, RecoveryConflict, RecoveryUnavailable
 from worker_matrix_state import WorkerMatrix, matrix_event_key
 from worker_sessions import WorkerSessions
-from qwenpaw_message_execution import MessageExecution, publish_nio_reply
-from qwenpaw_task_assignment import TaskAssignments
+from agentteams_matrix.message_execution import MessageExecution, publish_nio_reply
+from agentteams_matrix.task_inputs import TaskAssignments
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,46 @@ class TaskExecution:
             tracker._agentteams_task_admission_lock = asyncio.Lock()
         if not hasattr(tracker, "_agentteams_task_native_active"):
             tracker._agentteams_task_native_active = set()
+        if not hasattr(tracker, "_agentteams_task_failed_retries"):
+            tracker._agentteams_task_failed_retries = set()
         self.admitted = tracker._agentteams_task_admissions
         self.native_active = tracker._agentteams_task_native_active
+        self.failed_retries = tracker._agentteams_task_failed_retries
         self.lock = tracker._agentteams_task_admission_lock
         self.sessions = WorkerSessions("qwenpaw", recovery=self.recovery)
         self.matrix = WorkerMatrix("qwenpaw", recovery=self.recovery)
         self.messages = MessageExecution(channel, self)
         self.assignments = TaskAssignments(self)
+
+    async def supplement(self, room, event, key):
+        """Route a Core-authorized input to the current native Task writer."""
+        if not self.native_active:
+            return False
+        from pathlib import Path
+        import os
+        import yaml
+        from runtime_control import task_supplement
+        runtime_path = Path(os.getenv("TEAMHARNESS_RUNTIME_CONFIG") or
+                            str(Path(os.environ["AGENTTEAMS_WORKER_HOME"]) / "runtime/runtime.yaml"))
+        runtime = yaml.safe_load(runtime_path.read_text())
+        record = await asyncio.to_thread(self.matrix.input, key)
+        content = record["input"]["content"]
+        source = {"event_id": record["event_id"], "room_id": room, "sender": record["input"]["sender"],
+                  "body": content.get("body"), "mentions": (content.get("m.mentions") or {}).get("user_ids", []),
+                  "answer": content.get("com.agentteams.answer"), "execution_control": content.get("com.agentteams.control")}
+        for team, task_id, generation in tuple(self.native_active):
+            task = await asyncio.to_thread(self.recovery.current, task_id, team)
+            execution = task.get("execution", {}) if task else {}
+            if (not task or execution.get("generation") != generation
+                    or execution.get("process_id") != self.recovery.process):
+                continue
+            identity = {"team_id": team, "task_id": task_id,
+                        **{field: execution[field] for field in ("generation", "instance_id", "process_id")}}
+            if task_supplement(runtime, {**identity, "room_id": task["room_id"]}, source):
+                await asyncio.to_thread(self.verify, identity, monitoring=True)
+                await self.assignments.accept(identity, record, content["body"])
+                return True
+        return False
 
     async def accept_input(self, room, event, intent, *, task_id=None):
         """Persist an accepted native callback without inventing a batch token."""
@@ -163,6 +196,7 @@ class TaskExecution:
                 execution = entry["task"].get("execution") or {}
                 if (execution.get("process_id") == self.recovery.process
                         and execution.get("instance_id") == snapshot["instance_id"]
+                        and execution.get("state") != "released"
                         and (team, task_id, execution.get("generation")) in self.admitted):
                     admission = (team, task_id, execution.get("generation"))
                     if source:
@@ -172,14 +206,22 @@ class TaskExecution:
                         continue
                     # A live native turn owns its checkpoints and reply. Once
                     # fully closed, only a saved pending reply may be retried.
+                    checkpoint = execution.get("checkpoint") or {}
+                    submitted_report = (entry["task"]["status"] in {"submitted", "completed"}
+                                        and entry["task"].get("result_path")
+                                        and checkpoint.get("delivery") != "delivered")
                     if (admission in self.native_active
-                            or (execution.get("checkpoint") or {}).get("delivery") != "pending"):
+                            or checkpoint.get("delivery") != "pending" and not submitted_report):
                         continue
                 try:
                     claimed = await asyncio.to_thread(self.recovery.claim, snapshot, entry)
                 except RecoveryConflict:
                     # A competing Worker must not prevent unrelated owned work.
                     continue
+                from runtime_control import retired_task_runs, retired_run_delivered
+                for ending in retired_task_runs(team, claimed['task'], self.recovery.process):
+                    ending_event = await self.channel._room_send_with_retry(ending['room_id'], 'm.room.message', ending['content'], tx_id=ending['transaction'])
+                    retired_run_delivered(self.recovery.process, ending['transaction'], getattr(ending_event, 'event_id', None))
                 task = claimed["task"]
                 if task["execution"]["state"] == "needs_verification":
                     logger.warning("Task %s requires side-effect verification before native execution", task_id)
@@ -208,7 +250,7 @@ class TaskExecution:
                 await self.channel.enqueue_recovered_task({
                     "recovery_text": Recovery.resume_text({**task, "team_id": team, "spec": claimed["spec"]}),
                     "meta": {"task_execution": identity, "task_session_id": session_id,
-                             "task_id": task_id, "team_id": team,
+                             "task_id": task_id, "main_task_id": task.get("main_task_id"), "team_id": team,
                              "execution_generation": identity["generation"],
                              "room_id": task["room_id"], "sender_id": self.channel.matrix_user_id,
                              "agent_matrix_user_id": self.channel.matrix_user_id,
@@ -222,6 +264,15 @@ class TaskExecution:
 
     def native_closed(self, identity):
         self.native_active.discard((identity["team_id"], identity["task_id"], identity["generation"]))
+
+    async def retry_failed(self, identity, *, iteration_limit=False):
+        task = await asyncio.to_thread(self.verify, identity, monitoring=True)
+        checkpoint = task['execution'].get('checkpoint') or {}
+        key = (identity['team_id'], identity['task_id'], 'iteration_limit' if iteration_limit else tuple(checkpoint.get('completed_steps') or []))
+        if key in self.failed_retries:
+            return
+        if await asyncio.to_thread(self.recovery.release_failed_turn, identity):
+            self.failed_retries.add(key)
 
     async def deliver(self, identity, room, checkpoint, text):
         task_id, team = identity["task_id"], identity["team_id"]

@@ -100,7 +100,35 @@ class NativeTaskToolTest(unittest.TestCase):
         finally:
             server.shutdown();server.server_close();thread.join()
 
-    def run_task(self, action, invalid_source=False, no_spec=False, stale_input=False, use_prepared_submission=False):
+    def test_driver_task_preserves_the_bound_human_source(self):
+        self.run_task('create', driver=True)
+
+    def test_runtime_hooks_bind_the_human_source_for_driver_task(self):
+        self.run_task('create', driver=True, native_runtime=True)
+
+    def test_task_factory_loads_without_importing_another_plugin_package(self):
+        script = '''
+import importlib.util, sys
+from pathlib import Path
+from types import SimpleNamespace
+from qwenpaw.plugins.module_isolation import build_plugin_builtins
+path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('isolated_teamharness', path)
+plugin = importlib.util.module_from_spec(spec)
+plugin.__dict__['__builtins__'] = build_plugin_builtins('isolated_teamharness', [str(path.parent)], path)
+spec.loader.exec_module(plugin)
+ctx = SimpleNamespace(request=SimpleNamespace(channel_meta={}), extras={})
+assert plugin._sanitizer_factory(ctx, None) is not None
+assert ctx.extras['agentteams_task_server_path'].endswith('/mcp/server.py')
+assert callable(ctx.extras['agentteams_canonical_admit'])
+'''
+        env = {**os.environ, 'PYTHONPATH': str(core_source() / 'shared/lib'),
+               'AGENTTEAMS_CORE_SOURCE': str(core_source())}
+        result = subprocess.run([sys.executable, '-c', script, str(HARNESS / 'adapters/teamharness/plugin.py')],
+                                env=env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def run_task(self, action, invalid_source=False, no_spec=False, stale_input=False, use_prepared_submission=False, driver=False, native_runtime=False):
         from agentscope.agent import Agent
         from agentscope.model import ChatModelBase, ChatResponse
         from agentscope.message import Msg, ToolCallBlock, TextBlock
@@ -147,6 +175,10 @@ class NativeTaskToolTest(unittest.TestCase):
             result = {"ok":True,"outcome":"input_changed","noTaskRegistered":True,"sourceEventId":"$source","inputs":[{"eventId":"$new","userId":"@human:test","roomId":"!source:test","body":"Do not create the requested Task."}]}
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                testcase.assertEqual(urlsplit(self.path).path, "/api/v1/tasks/room-context")
+                self.send_response(200);self.send_header("Content-Type","application/json");self.end_headers()
+                self.wfile.write(b"{}")
             def do_POST(self):
                 body=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 # This fixture checks SDK/CLI transport; the native ledger's
@@ -200,14 +232,28 @@ class NativeTaskToolTest(unittest.TestCase):
             # Keep the native MCPTool's ASK policy. The plugin must authorize
             # only this fixed task capability, rather than test code overriding it.
             schema=bridge.schema("manager" if action=="create" else "leader")
-            await toolkit.add_tool(MCPTool("teamharness",mcp.types.Tool(name="task",description=schema["description"],inputSchema=schema["inputSchema"]),session=Session()))
+            if driver:
+                from qwenpaw.drivers.adapters.agentscope_tool import DriverCapabilityTool
+                from qwenpaw.drivers.capabilities import DriverCapability, CapabilityExposure, DriverInvocationResult
+                async def invoke(invocation):
+                    return DriverInvocationResult(ok=True, value=await Session().call_tool('task', invocation.payload))
+                capability = DriverCapability('mcp://teamharness/tool/invoke/task', 'teamharness', 'mcp', 'tool', 'invoke', 'task',
+                    description=schema['description'], input_schema=schema['inputSchema'],
+                    exposure=CapabilityExposure(as_tool=True, tool_name='mcp__teamharness__task'))
+                await toolkit.add_tool(DriverCapabilityTool(capability, invoke))
+            else:
+                await toolkit.add_tool(MCPTool("teamharness",mcp.types.Tool(name="task",description=schema["description"],inputSchema=schema["inputSchema"]),session=Session()))
             async def shell(command:str):raise AssertionError("acceptance invoked general shell")
             await toolkit.add_tool(FunctionTool(shell,name="execute_shell_command"))
-            agent=Agent("Leader","Use the task system for coordination.",model,toolkit=toolkit,middlewares=[plugin._sanitizer_factory(None,None)])
+            middlewares = [plugin._sanitizer_factory(None,None)]
+            if native_runtime:
+                from qwenpaw.tool_calls import ToolCoordinator, ToolCoordinatorMiddleware
+                middlewares.insert(0, ToolCoordinatorMiddleware(coordinator=ToolCoordinator()))
+            agent=Agent("Leader","Use the task system for coordination.",model,toolkit=toolkit,middlewares=middlewares)
             tokens=[]
             try:
                 if action=="create":
-                    tokens=[(plugin._creation_sources,plugin._creation_sources.set([{ "inputId":"input-1", "eventId":"$source", "userId":"@human:test", "roomId":"!source:test"}])),
+                    tokens=[] if native_runtime else [(plugin._creation_sources,plugin._creation_sources.set([{ "inputId":"input-1", "eventId":"$source", "userId":"@human:test", "roomId":"!source:test"}])),
                             (plugin._source_event,plugin._source_event.set("$source")),
                             (plugin._requester_route,plugin._requester_route.set({"target_user":"@human:test","target_session":"!source:test"}))]
                     inputs=[Msg(name="Human",role="user",content=[TextBlock(text="Delegate this request.")])]
@@ -232,7 +278,28 @@ class NativeTaskToolTest(unittest.TestCase):
                     Runtime._apply_context_injections(ctx);inputs=ctx.input_msgs
                     for field,variable in (("review_task_token",plugin._review_task),("completion_task_token",plugin._completion_task)):
                         if field in ctx.extras:tokens.append((variable,ctx.extras[field]))
-                await agent.reply(inputs)
+                if native_runtime:
+                    from qwenpaw.runtime.hooks import HookRegistry
+                    import qwenpaw.runtime.runtime as runtime_module
+                    from unittest.mock import AsyncMock
+                    registry = HookRegistry()
+                    plugin._register_coordination_hook(SimpleNamespace(register_runtime_hook=registry.register))
+                    workspace = SimpleNamespace(plugins=SimpleNamespace(hook_registry=registry, modes=[],
+                        slash_command_registry=SimpleNamespace(dispatch=AsyncMock(return_value=None))))
+                    ctx = HookContext(request=SimpleNamespace(channel_meta={
+                        'event_id':'$source', 'sender_id':'@human:test', 'room_id':'!source:test'}),
+                        session_id='source', agent_id='manager', root_session_id='source', root_agent_id='manager',
+                        workspace_dir=None, workspace=workspace, app_services=None, agent=None, input_msgs=inputs)
+                    runtime = Runtime(workspace=workspace, app_services=None)
+                    runtime._normalize = lambda request: request
+                    runtime._build_context = lambda request: ctx
+                    with patch.object(runtime_module, 'AgentBuilder', return_value=SimpleNamespace(build=AsyncMock(return_value=agent))), \
+                         patch.object(plugin, '_controller_json', return_value={'humans':[{'matrixUserID':'@human:test'}]}), \
+                         patch.object(plugin, '_prepare_delivery_context', AsyncMock()), \
+                         patch.object(plugin, '_prepare_manager_roster', AsyncMock()):
+                        _ = [event async for event in runtime.run(ctx.request)]
+                else:
+                    await agent.reply(inputs)
                 testcase.assertEqual(model.calls, 2 if invalid_source or action == "create" else 1)
                 if stale_input:
                     testcase.assertTrue(agent.state.middle_context["teamharness.refreshed_inputs"]["$new"])

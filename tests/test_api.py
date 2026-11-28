@@ -1074,3 +1074,22 @@ def test_require_agent_running_accepts_running_agent(api_url):
     client = QwenPawApiClient(api_url)
     _ApiHandler.agents = [{"id": "default", "startup_status": "running"}]
     client.require_agent_running("default")
+
+
+def test_managed_model_preserves_existing_responses_protocol(api_url):
+    _ApiHandler.providers['agentteams-gateway'] = {
+        'id': 'agentteams-gateway', 'name': 'Gateway',
+        'chat_model': 'OpenAIResponseModel', 'models': [], 'extra_models': [],
+    }
+    QwenPawApiClient(api_url).configure_active_model('agentteams-gateway', 'managed-model')
+    assert _ApiHandler.providers['agentteams-gateway']['chat_model'] == 'OpenAIResponseModel'
+
+
+def test_managed_model_explicit_protocol_replaces_existing_choice(api_url):
+    _ApiHandler.providers['agentteams-gateway'] = {
+        'id': 'agentteams-gateway', 'name': 'Gateway',
+        'chat_model': 'OpenAIChatModel', 'models': [], 'extra_models': [],
+    }
+    QwenPawApiClient(api_url).configure_active_model(
+        'agentteams-gateway', 'managed-model', chat_model='OpenAIResponseModel')
+    assert _ApiHandler.providers['agentteams-gateway']['chat_model'] == 'OpenAIResponseModel'

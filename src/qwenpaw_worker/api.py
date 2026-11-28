@@ -360,7 +360,7 @@ class QwenPawApiClient:
         base_url: str = "",
         api_key: str = "",
         provider_name: str = "",
-        chat_model: str = "OpenAIChatModel",
+        chat_model: Optional[str] = None,
         supports_image: Optional[bool] = None,
         supports_video: Optional[bool] = None,
         supports_multimodal: Optional[bool] = None,
@@ -371,6 +371,8 @@ class QwenPawApiClient:
             (item for item in providers if item.get("id") == provider_id),
             None,
         )
+        # Keep the native protocol when the managed record does not declare one.
+        chat_model = chat_model or (provider or {}).get("chat_model") or "OpenAIChatModel"
         model_payload: dict[str, Any] = {"id": model, "name": model}
         if supports_image is not None:
             model_payload["supports_image"] = supports_image
@@ -473,6 +475,8 @@ class QwenPawApiClient:
         )
         if provider is None:
             raise QwenPawApiError("QwenPaw model provider readback mismatch")
+        if provider.get("chat_model") != chat_model:
+            raise QwenPawApiError("QwenPaw model protocol readback mismatch")
         known_models = {
             str(item.get("id"))
             for item in list(provider.get("models") or [])

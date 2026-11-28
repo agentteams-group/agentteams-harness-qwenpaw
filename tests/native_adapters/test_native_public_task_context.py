@@ -141,8 +141,8 @@ class NativePublicContextTest(unittest.TestCase):
                         await plugin._prepare_public_task_event(ctx, {"kind": "task_assigned", "task_id": identity, "main_task_id": "main", "delivery_id": "d1"})
                         output = base / "shared/tasks" / identity / "workspace"
                         self.assertEqual(context.get_current_workspace_dir(), profile)
-                        self.assertEqual(context.get_tool_base_dir(), output)
-                        self.assertEqual(context.get_all_project_dir_paths()[0], output)
+                        self.assertEqual(context.get_tool_base_dir(), output.resolve())
+                        self.assertEqual(context.get_all_project_dir_paths()[0], output.resolve())
                         await asyncio.sleep(0.01)
                         await write_file("result.py", identity)
                         self.assertEqual((output / "result.py").read_text(), identity)
@@ -152,7 +152,7 @@ class NativePublicContextTest(unittest.TestCase):
                             self.assertTrue(await middleware._allow_task_output_change("rm result.py", None))
                             self.assertFalse(await middleware._allow_task_output_change("rm /tmp/foreign.csv", None))
                         result = await execute_shell_command("pwd")
-                        self.assertTrue(any(str(output) in getattr(block, "text", "") for block in result.content))
+                        self.assertTrue(any(str(output.resolve()) in getattr(block, "text", "") for block in result.content))
                         if fail:
                             raise RuntimeError("own synthetic interruption")
                     finally:
