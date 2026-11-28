@@ -208,6 +208,7 @@ RUN chmod +x /opt/agentteams/scripts/lib/mc-wrapper.sh && \
 # not carry the fix). The build-time run below applies it for the 2.2.2.post1 image.
 COPY scripts/patch-qwenpaw-driver-policy-reload.py /opt/agentteams/scripts/patch-qwenpaw-driver-policy-reload.py
 COPY scripts/patch-qwenpaw-matrix-cron-final.py /opt/agentteams/scripts/patch-qwenpaw-matrix-cron-final.py
+COPY scripts/patch-qwenpaw-startup-discovery.py /opt/agentteams/scripts/patch-qwenpaw-startup-discovery.py
 COPY scripts/patch-qwenpaw-private-cleanup.py /opt/agentteams/scripts/patch-qwenpaw-private-cleanup.py
 # In-place runtime upgrade: two-phase orchestrator + checker CLI, kept next to
 # the patch script so the orchestrator's `$(dirname $0)` resolution finds both
@@ -215,7 +216,8 @@ COPY scripts/patch-qwenpaw-private-cleanup.py /opt/agentteams/scripts/patch-qwen
 COPY --chmod=755 scripts/upgrade_qwenpaw_runtime.sh /opt/agentteams/scripts/upgrade_qwenpaw_runtime.sh
 COPY --chmod=755 scripts/check_qwenpaw_upgrade.py /opt/agentteams/scripts/check_qwenpaw_upgrade.py
 COPY tests/check_driver_policy_reload.py /tmp/check_driver_policy_reload.py
-RUN /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-driver-policy-reload.py && \
+RUN /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-startup-discovery.py && \
+    /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-driver-policy-reload.py && \
     /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-matrix-cron-final.py && \
     /opt/venv/qwenpaw/bin/python /opt/agentteams/scripts/patch-qwenpaw-private-cleanup.py && \
     /opt/venv/qwenpaw/bin/python /tmp/check_driver_policy_reload.py && \
