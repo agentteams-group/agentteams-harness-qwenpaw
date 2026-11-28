@@ -85,3 +85,15 @@ image continues to install it under `/opt/agentteams/plugins/qwen-code-bridge`.
 Matrix key maintenance retains its failure counter for the lifetime of each
 client. Five consecutive failures make channel health unhealthy; a successful
 pass restores healthy status without stopping recovery.
+
+## Managed model protocol
+
+`desired.model.chatModel` selects the native QwenPaw provider driver. When that
+field is absent, `QWENPAW_CHAT_MODEL` can select it through the member's environment
+parameters, for example `OpenAIResponseModel` for an OpenAI Responses endpoint.
+A saved native provider choice is retained when neither is specified; a new
+provider uses QwenPaw's existing `OpenAIChatModel` default. This does not change
+the selected model, credentials, tool permissions or reasoning level. Choose an
+endpoint that supports the requested tools and reasoning together.
+
+Assigned Tasks preserve the native SDK's typed iteration-budget stop through envelope metadata. After native cleanup, the common recovery API can release an attempt only when every admitted operation has a confirmed outcome. Iteration-limit continuation is bounded once per execution node in the process; extra reads do not reset it. Unknown effects and Human cancellation are not automatic-retry permission.

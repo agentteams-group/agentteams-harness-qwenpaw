@@ -3,15 +3,13 @@ import json
 import time
 
 
-def bounded(value):
-    from runtime_observability import redact
-    text = redact(json.dumps(value, ensure_ascii=False, default=str))
-    return json.loads(text) if len(text) <= 4096 else {'preview': text[:4096], 'truncated': True}
+from run_progress import progress_value as bounded
 
 
 class MatrixProgress:
     def __init__(self, send, run_id):
         self.send, self.run_id, self.calls = send, run_id, {}
+        self.closed = False
 
     async def publish(self, block, previous=None):
         content = {'msgtype': 'm.notice', 'body': block.get('tool_name') or '执行过程',
@@ -49,5 +47,9 @@ class MatrixProgress:
                          'started_at': int(time.time() * 1000)}
                 self.calls[identity] = {'block': block, 'event_id': await self.publish(block)}
 
-    async def finish(self):
-        await self.publish({'type': 'error', 'kind': 'quiet', 'title': '已处理'})
+    async def finish(self, kind='quiet'):
+        if self.closed:
+            return
+        await self.publish({'type': 'error', 'kind': kind,
+                            'title': {'quiet': '已处理', 'failed': '执行失败', 'cancelled': '已停止'}[kind]})
+        self.closed = True

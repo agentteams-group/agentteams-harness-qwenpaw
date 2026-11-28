@@ -189,6 +189,7 @@ COPY --from=agentteams manager/scripts/init/qwenpaw_manager_skill_sync.py /opt/a
 COPY --chmod=755 scripts/qwenpaw-worker-entrypoint.sh /opt/agentteams/scripts/qwenpaw-worker-entrypoint.sh
 COPY --chmod=755 scripts/qwenpaw-teamharness-plugin-reload.sh /opt/agentteams/scripts/qwenpaw-teamharness-plugin-reload.sh
 COPY --from=shared . /opt/agentteams/scripts/lib/
+COPY telemetry/at_native_telemetry.py /opt/agentteams/scripts/lib/telemetry/at_native_telemetry.py
 COPY adapters/teamharness/task_trace.py /opt/agentteams/scripts/lib/telemetry/at_task_trace.py
 RUN /opt/venv/qwenpaw/bin/pip install --index-url "${PIP_INDEX_URL}" \
     -r /opt/agentteams/scripts/lib/telemetry/requirements.txt

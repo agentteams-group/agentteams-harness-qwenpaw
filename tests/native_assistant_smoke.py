@@ -15,7 +15,7 @@ from assistant_fixture import AssistantFixture
 from agentteams_matrix.channel import AgentTeamsMatrixChannel
 from qwenpaw.app.channels.base import BaseChannel
 from nio import RoomMessageNotice
-from qwenpaw_matrix_sync import ManagedNioSync
+from agentteams_matrix.managed_sync import ManagedNioSync
 
 
 async def main():

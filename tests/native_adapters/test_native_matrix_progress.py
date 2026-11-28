@@ -77,7 +77,7 @@ def test_managed_turns_link_saved_results_without_chat_receipts():
         source = {'event_id': '$input', 'room_id': '!room:test', 'input': {'content': {}}}
         task = {'team_id': 'squad', 'task_id': 'execution', 'generation': 2}
         for meta, expected in [
-            ({'task_execution': task}, 'qwenpaw:task:squad:execution:2'),
+            ({'task_execution': task}, 'task:squad:execution:2'),
             ({'message_execution': {'event_key': 'accepted'}, 'event_id': '$input'}, 'qwenpaw:message:!room:test:$input'),
         ]:
             channel._room_send_with_retry.reset_mock()
@@ -87,7 +87,8 @@ def test_managed_turns_link_saved_results_without_chat_receipts():
             send = AsyncMock()
             meta['_matrix_native_progress'] = MatrixProgress(send, expected)
             await channel._on_process_completed(SimpleNamespace(session_id='native'), '!room:test', meta)
-            send.assert_not_awaited()
+            send.assert_awaited_once()
+            assert send.call_args.args[0]['org.agentteams.run']['blocks'][-1]['kind'] == 'quiet'
             if 'task_execution' in meta:
                 await channel.send_task_reply('!room:test', '开发完成', 'saved', task)
             else:
@@ -103,7 +104,7 @@ def test_managed_turns_link_saved_results_without_chat_receipts():
 
 def test_typed_planning_event_uses_verified_ingress_with_its_original_type():
     from nio import Event
-    from qwenpaw_matrix_sync import ManagedNioSync
+    from agentteams_matrix.managed_sync import ManagedNioSync
     from agentteams_matrix.channel import AgentTeamsMatrixChannel
 
     async def check():
@@ -152,3 +153,30 @@ def test_leader_coordination_drops_pre_tool_draft_and_publishes_structured_final
                                                   'blocks': [{'type': 'text', 'text': content['body']}]}
         assert content['org.agentteams.progress_only']
     asyncio.run(check())
+
+
+def test_final_edit_explicitly_clears_placeholder_progress_marker():
+    from agentteams_matrix.channel import AgentTeamsMatrixChannel
+    async def check():
+        channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+        channel._client = object()
+        channel._user_id = '@worker:test'
+        channel._apply_mention = lambda *args: None
+        channel._room_send_with_retry = AsyncMock(return_value=SimpleNamespace(event_id='$edit'))
+        await channel._edit_matrix_event('!room:test', '$placeholder', '实际结论', msgtype='m.text', run_id='run')
+        content = channel._room_send_with_retry.call_args.args[2]
+        assert content['m.new_content']['org.agentteams.progress_only'] is False
+        assert content['org.agentteams.progress_only'] is False
+        assert content['m.new_content']['org.agentteams.run_id'] == 'run'
+    asyncio.run(check())
+
+
+def test_empty_native_reasoning_does_not_become_a_renderer_placeholder():
+    from qwenpaw.schemas import Message, MessageType, RunStatus, TextContent
+    from agentteams_matrix.channel import AgentTeamsMatrixChannel
+    channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+    channel._message_to_content_parts = lambda event: (_ for _ in ()).throw(AssertionError('empty reasoning must not use the fallback renderer'))
+    empty = Message(type=MessageType.REASONING, role='assistant', content=[], status=RunStatus.Completed)
+    assert channel._text_from_message_event(empty) == ''
+    text = Message(type=MessageType.REASONING, role='assistant', content=[TextContent(text='检查需求')], status=RunStatus.Completed)
+    assert channel._text_from_message_event(text) == '检查需求'

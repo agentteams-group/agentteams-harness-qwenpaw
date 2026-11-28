@@ -182,10 +182,7 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
 
     receipts = _receipt_module()
     if _ctx is not None:
-        from qwenpaw_message_execution import canonical_registration
-        async def registration(agent, call):
-            return await canonical_registration(agent, call, ASSET_DIR / 'mcp/server.py')
-        _ctx.extras['agentteams_task_registration'] = registration
+        _ctx.extras['agentteams_task_server_path'] = str(ASSET_DIR / 'mcp/server.py')
         async def admit_canonical(agent):
             if not os.getenv('AGENTTEAMS_CONTROLLER_URL'):
                 return
@@ -230,6 +227,18 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
         _finished_phase_receipt = ""
         _finished_phase_display = "NO_REPLY"
         _creation_refresh_pending = False
+
+        async def on_reply(self, agent, input_kwargs, next_handler):
+            from agentscope.event import EventType
+            request = getattr(_ctx, "request", None)
+            assigned = request is not None and _request_meta(request).get("task_execution")
+            async for event in next_handler(**input_kwargs):
+                if assigned and getattr(event, "type", None) == EventType.EXCEED_MAX_ITERS.value:
+                    # Preserve the native stop reason through QwenPaw's public
+                    # envelope metadata; model text is never recovery authority.
+                    event.metadata = {**(getattr(event, "metadata", None) or {}),
+                                      "org.agentteams.native_stop": "exceed_max_iters"}
+                yield event
 
         async def on_system_prompt(self, agent: Any, current_prompt: str) -> str:
             contract = _team_prompt(agent)
@@ -373,6 +382,7 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
             if not self._task_scope:
                 return False
             task_id, root, assignee, delegation = self._task_scope
+            root = Path(root).resolve()
             try:
                 from qwenpaw_worker.cleanup_policy import is_private_cleanup
                 from qwenpaw.config.context import get_tool_base_dir
@@ -417,6 +427,20 @@ def _sanitizer_factory(_ctx: Any, _agent_config: Any):
             if _is_task_tool(str(getattr(call, "name", ""))):
                 from agentscope.permission import PermissionBehavior, PermissionDecision
                 return PermissionDecision(behavior=PermissionBehavior.ALLOW, message="Task system authenticates and authorizes this fixed Task operation; no arbitrary shell is available.")
+            runtime_path = os.getenv("TEAMHARNESS_RUNTIME_CONFIG")
+            if runtime_path and call:
+                import yaml
+                from runtime_control import mcp_approval
+                runtime = yaml.safe_load(Path(runtime_path).read_text())
+                tool_name = str(getattr(call, "name", ""))
+                for server in runtime.get("desired", {}).get("mcpServers") or []:
+                    if any(tool_name.startswith(prefix + server["name"] + "__") for prefix in ("mcp__", "")):
+                        mode = mcp_approval(runtime, server["name"])
+                        if mode:
+                            from agentscope.permission import PermissionBehavior, PermissionDecision
+                            behavior = PermissionBehavior.ALLOW if mode == "allow" else PermissionBehavior.ASK
+                            return PermissionDecision(behavior=behavior, message="AgentTeams MCP approval policy")
+                        break
             command = str((input_kwargs.get("tool_input") or {}).get("command") or "")
             if getattr(call, "name", "") == "execute_shell_command" and (_compound_private_cleanup(command) or self._task_scope and _compound_output_change(command)):
                 from agentscope.permission import PermissionBehavior, PermissionDecision
@@ -943,6 +967,7 @@ async def _prepare_public_task_event(ctx: Any, event: dict) -> None:
     if not task_tool_name:
         raise ValueError("Native Task tool is unavailable for this managed phase")
     common = _task_context_module()
+    prepared = {"planning": sorted(_planning_tasks.get())} if kind == "handoff" else {}
     if kind != "handoff":
         task_id = event.get("main_task_id") if kind == "main_task_ready" else event.get("task_id")
         result = await _prepare_task_context(ctx, "begin" if kind == "task_assigned" else "get", task_id)
@@ -956,6 +981,9 @@ async def _prepare_public_task_event(ctx: Any, event: dict) -> None:
                 key = {"execution": "execution_task_token", "ack": "ack_scope_token", "review": "review_task_token", "completion": "completion_task_token"}[field]
                 ctx.extras[key] = variable.set(prepared[field])
         ctx.inject_context(prepared["fact"] + "\n" + json.dumps(common.model_context(prepared["context"]), ensure_ascii=False), source="teamharness_public_task_prepared")
+    if os.getenv("AGENTTEAMS_OTEL_ENABLED", "").lower() in {"true", "1"}:
+        from at_native_telemetry import bind_task_context
+        bind_task_context(prepared)
     _load_phase_skill(ctx, "task-management")
     if kind == "handoff":
         ctx.inject_context("规划时在 task plan 的 overview 中写明任务目标、要求、验收标准、节点分工和最终产物。"
@@ -1015,11 +1043,11 @@ async def _manager_report_context(ctx: Any) -> bool:
     meta = _request_meta(ctx.request)
     if meta.get("agent_matrix_user_id"):
         ctx.extras["native_actor_token"] = _native_actor.set(str(meta["agent_matrix_user_id"]))
-    if meta.get("task_execution"):
+    if meta.get("task_execution") or meta.get("task_continuation"):
         # Startup admissions carry a process-fenced Task, not a new Matrix
         # assignment or a request to recreate its legacy Project context.
         from task_recovery import Recovery, RecoveryConflict
-        identity = meta["task_execution"]
+        identity = meta.get("task_execution") or meta["task_continuation"]
         recovery = Recovery()
         task = await asyncio.to_thread(recovery.current, identity["task_id"], identity["team_id"])
         execution = task.get("execution", {}) if task else {}
@@ -1068,6 +1096,20 @@ async def _manager_report_context(ctx: Any) -> bool:
                 _planning_tasks.set(frozenset(admission["pending_task_ids"]))
         await _prepare_public_task_event(ctx, api_event)
         return bool((_phase_retry.get() or {}).get("failed"))
+    if not api_event and os.getenv("AGENTTEAMS_CONTROLLER_URL") and _room_id(ctx.request):
+        prepared = await asyncio.to_thread(_native_module().invoke,
+            {"operation": "room_context", "room": _room_id(ctx.request)})
+        if prepared:
+            if prepared.get("execution"):
+                _bind_public_task_io(ctx, prepared)
+                ctx.extras["execution_task_token"] = _execution_task.set(prepared["execution"])
+                ctx.extras["ack_scope_token"] = _ack_scope.set(prepared["ack"])
+            if os.getenv("AGENTTEAMS_OTEL_ENABLED", "").lower() in {"true", "1"}:
+                from at_native_telemetry import bind_task_context
+                bind_task_context(prepared)
+            ctx.inject_context(prepared["fact"] + "\n" + json.dumps(
+                _task_context_module().model_context(prepared["context"]), ensure_ascii=False),
+                source="teamharness_task_room_context")
     route = meta.get("teamharness_requester_route")
     if isinstance(route, dict) and route.get("target_session"):
         ctx.extras.setdefault("requester_route_token", _requester_route.set(route))
@@ -1219,8 +1261,6 @@ async def _manager_report_context(ctx: Any) -> bool:
                 for tool in schemas:
                     if tool["function"]["name"].split("__")[-1].lower() in {"taskflow", "projectflow", "filesync"}:
                         await ctx.agent.toolkit.remove_tool(tool["function"]["name"])
-                ctx.inject_context("Use the native Task tool to create the Task room, then end this intake turn. Plan only in that room.",
-                                   source="teamharness_leader_intake")
             return False
         event = meta.get("teamharness_workflow") or {}
         main_id = event.get("task_id") if event.get("type") == "MAIN_TASK_COMPLETED" else ""

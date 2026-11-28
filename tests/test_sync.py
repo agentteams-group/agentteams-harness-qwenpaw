@@ -49,6 +49,9 @@ def test_mirror_all_restores_worker_and_shared_storage(tmp_path: Path, monkeypat
             "--overwrite",
             "--exclude",
             "credentials/**",
+            "--exclude", ".qwenpaw/workspaces/**/*-wal",
+            "--exclude", ".qwenpaw/workspaces/**/*-shm",
+            "--exclude", ".qwenpaw/workspaces/**/*-journal",
         ),
         (
             "mirror",
@@ -57,6 +60,9 @@ def test_mirror_all_restores_worker_and_shared_storage(tmp_path: Path, monkeypat
             "--overwrite",
             "--exclude",
             "credentials/**",
+            "--exclude", ".qwenpaw/workspaces/**/*-wal",
+            "--exclude", ".qwenpaw/workspaces/**/*-shm",
+            "--exclude", ".qwenpaw/workspaces/**/*-journal",
         ),
     ]
 

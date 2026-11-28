@@ -51,6 +51,7 @@ class _FakeQwenPawApi:
         self.acls = {"agentteams_matrix": {"whitelist": {}, "blacklist": {}, "pending": []}}
         self.mcp = {}
         self.mcp_events = []
+        self.mcp_policies = {}
         self.channel_events = []
         self.model_events = []
         self.active_model = None
@@ -60,6 +61,11 @@ class _FakeQwenPawApi:
         self.enabled_skills = []
         self.skill_events = []
         self.disabled_skills = []
+        self.agent_updates = []
+
+    def configure_agent(self, agent_id, updates):
+        self.agent_updates.append((agent_id, updates))
+        return updates
 
     def disable_skill(self, name):
         self.disabled_skills.append(name)
@@ -89,6 +95,9 @@ class _FakeQwenPawApi:
     def list_mcp(self):
         return list(self.mcp.values())
 
+    def list_mcp_tools(self, key):
+        return []
+
     def create_mcp(self, key, payload):
         self.mcp_events.append(("create", key))
         self.mcp[key] = {"key": key, **payload}
@@ -98,6 +107,10 @@ class _FakeQwenPawApi:
         self.mcp_events.append(("update", key))
         self.mcp[key] = {"key": key, **payload}
         return self.mcp[key]
+
+    def put_mcp_policy(self, key, payload):
+        self.mcp_policies[key] = payload
+        return payload
 
     def delete_mcp(self, key):
         self.mcp_events.append(("delete", key))
@@ -157,6 +170,19 @@ class _MatrixFailingGetChannelApi(_FakeQwenPawApi):
 def _runtime_updater(*args, **kwargs):
     kwargs.setdefault("api_client", _FakeQwenPawApi())
     return RuntimeUpdater(*args, **kwargs)
+
+
+def test_agent_approval_mode_uses_native_profile(tmp_path, monkeypatch):
+    monkeypatch.delenv('TEAMHARNESS_RUNTIME_CONFIG', raising=False)
+    api = _FakeQwenPawApi()
+    updater = _runtime_updater(_config(tmp_path), api_client=api)
+    for mode, level in [('allow', 'OFF'), ('ask', 'AUTO')]:
+        config = MemberRuntimeConfig(path=tmp_path / 'runtime.yaml', raw={
+            'member': {'runtimeName': 'worker-a', 'runtime': 'qwenpaw'},
+            'desired': {'approvalMode': mode},
+        })
+        updater.apply_once(config)
+        assert api.agent_updates[-1] == ('default', {'approval_level': level})
 
 
 def test_runtime_updater_syncs_and_enables_assigned_skills(tmp_path: Path) -> None:
@@ -3845,3 +3871,80 @@ def test_runtime_updater_subagent_model_missing_endpoint_degrades(
         updater.apply_once(runtime_config=_subagent_runtime_config(config, "qwen3.6-flash"))
 
     assert any("subagent model endpoint unavailable" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.parametrize('declared, native_env, expected', [
+    (None, None, None),
+    (None, 'OpenAIResponseModel', 'OpenAIResponseModel'),
+    ('OpenAIChatModel', 'OpenAIResponseModel', 'OpenAIChatModel'),
+])
+def test_managed_protocol_uses_declaration_or_native_parameter_without_forcing_chat(
+    tmp_path, monkeypatch, declared, native_env, expected,
+):
+    if native_env is None:
+        monkeypatch.delenv('QWENPAW_CHAT_MODEL', raising=False)
+    else:
+        monkeypatch.setenv('QWENPAW_CHAT_MODEL', native_env)
+    config = _config(tmp_path)
+    api = _FakeQwenPawApi()
+    updater = _runtime_updater(config=config, api_client=api, package_manager=_NoopPackageManager())
+    model = {'providerId': 'agentteams-gateway', 'model': 'managed-model'}
+    if declared is not None:
+        model['chatModel'] = declared
+    updater._apply_model(MemberRuntimeConfig(path=config.runtime_config_path, raw={'desired': {'model': model}}))
+    assert api.active_model['chat_model'] == expected
+
+
+def test_assigned_mcp_policy_reconciles_allow_ask_and_removal(tmp_path):
+    api = _FakeQwenPawApi()
+    updater = _runtime_updater(_config(tmp_path), api_client=api)
+    for mode in ["allow", "ask", "allow", None]:
+        server = {"name": "github", "url": "http://gateway/mcp", "transport": "http"}
+        if mode is not None:
+            server["approvals"] = {"tools": "*", "mode": mode}
+        config = MemberRuntimeConfig(tmp_path / "runtime.yaml", {"desired": {"mcpServers": [server]}})
+        updater._reconcile_mcp_clients(config, {}, force=False)
+        assert api.mcp_policies["github"]["default_effect"] == (mode or "ask")
+        assert api.mcp_policies["github"]["tool_overrides"] == []
+
+
+def test_inactive_mcp_activation_recovers_without_reapplying_unchanged_runtime(tmp_path, monkeypatch):
+    from qwenpaw_worker.api import QwenPawApiError
+    clock = [0.0]
+    monkeypatch.setattr("qwenpaw_worker.update.time.monotonic", lambda: clock[0])
+
+    class DelayedMcpApi(_FakeQwenPawApi):
+        active = False
+        available = False
+
+        def list_mcp_tools(self, key):
+            if not self.active:
+                raise QwenPawApiError("HTTP 502: MCP client saved but not active yet (status=inactive)")
+            return [{"name": "browser_snapshot"}]
+
+        def update_mcp(self, key, payload):
+            result = super().update_mcp(key, payload)
+            self.active = self.available
+            return result
+
+    api = DelayedMcpApi()
+    updater = _runtime_updater(config=_config(tmp_path), package_manager=_NoopPackageManager(), api_client=api)
+    desired = MemberRuntimeConfig(path=updater.config.runtime_config_path, raw={
+        "member": {"runtime": "qwenpaw"},
+        "desired": {"mcpServers": [{"name": "browser", "url": "https://browser.example/mcp"}]},
+    })
+    updater.apply_once(runtime_config=desired)
+    assert api.mcp_events == [("create", "browser")]
+    clock[0] = 5
+    assert updater.apply_once(runtime_config=desired).changed is False
+    assert api.mcp_events == [("create", "browser")]
+    api.available = True
+    clock[0] = 61
+    assert updater.apply_once(runtime_config=desired).changed is False
+    assert api.mcp_events == [("create", "browser"), ("update", "browser")]
+    clock[0] = 122
+    updater.apply_once(runtime_config=desired)
+    clock[0] = 183
+    updater.apply_once(runtime_config=desired)
+    assert api.mcp_events == [("create", "browser"), ("update", "browser")]
+    assert api.mcp_policies['browser']['default_effect'] == 'ask'

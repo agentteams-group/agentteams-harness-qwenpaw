@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import threading
+import tempfile
 import time
 from typing import Iterable, List, Optional
 
@@ -28,12 +31,60 @@ PROTECTED_RESTORE_HEADROOM_BYTES = 1024 * 1024
 #: without trusting mtimes.
 SYNC_STATE_VERSION = 1
 
+SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
+
+
+def _native_database(path: Path) -> bool:
+    if ".qwenpaw" not in path.parts or "workspaces" not in path.parts or ".corrupt-" in path.name:
+        return False
+    if path.name == "history.db":
+        return True
+    try:
+        with path.open("rb") as stream:
+            return stream.read(16) == b"SQLite format 3\0"
+    except OSError:
+        return False
+
+
+def _database_sidecar(path: Path) -> bool:
+    return any(path.name.endswith(suffix) and _native_database(path.with_name(path.name[:-len(suffix)]))
+               for suffix in SQLITE_SIDECARS)
+
+
+@contextmanager
+def _file_snapshot(path: Path, timeout: float | None = None):
+    if not _native_database(path):
+        yield path
+        return
+    deadline = time.monotonic() + (timeout if timeout is not None else 10)
+
+    def progress(*_args):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("native history snapshot timed out")
+
+    with tempfile.TemporaryDirectory(prefix="qwenpaw-history-") as directory:
+        target = Path(directory) / path.name
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)) as source:
+            with closing(sqlite3.connect(target)) as snapshot:
+                source.backup(snapshot, pages=256, progress=progress, sleep=0.05)
+                snapshot.execute("PRAGMA journal_mode=DELETE")
+                snapshot.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                if snapshot.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                    raise sqlite3.DatabaseError("native history snapshot failed quick_check")
+        yield target
+
+
+def _file_bytes(path: Path, timeout: float | None = None) -> bytes:
+    with _file_snapshot(path, timeout) as snapshot:
+        return snapshot.read_bytes()
+
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    with _file_snapshot(path) as snapshot:
+        with snapshot.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -129,6 +180,18 @@ class FileSync:
             text=text,
             timeout=timeout,
         )
+
+    def _upload_file(self, path: Path, destination: str, data: bytes | None, **kwargs) -> None:
+        if not _native_database(path):
+            self._mc("cp", str(path), destination, check=True, **kwargs)
+        elif data is not None:
+            with tempfile.TemporaryDirectory(prefix="qwenpaw-history-upload-") as directory:
+                snapshot = Path(directory) / path.name
+                snapshot.write_bytes(data)
+                self._mc("cp", str(snapshot), destination, check=True, **kwargs)
+        else:
+            with _file_snapshot(path, kwargs.get("timeout")) as snapshot:
+                self._mc("cp", str(snapshot), destination, check=True, **kwargs)
 
     def ensure_alias(self, timeout: float | None = None) -> None:
         if self._alias_set:
@@ -285,11 +348,11 @@ class FileSync:
             if not isinstance(entry, dict):
                 continue
             path = base / rel
-            if not path.is_file() or path.is_symlink():
+            if not path.is_file() or path.is_symlink() or _database_sidecar(path):
                 continue
             try:
                 if _sha256_file(path) != entry.get("sha256"):
-                    protected[rel] = path.read_bytes()
+                    protected[rel] = _file_bytes(path)
             except OSError:
                 continue
         return protected
@@ -301,7 +364,7 @@ class FileSync:
                 # With the --exclude above this is the normal case: mc never
                 # touched the dirty file, so writing it again would at best
                 # waste space and at worst truncate it on a full disk.
-                if path.is_file() and path.read_bytes() == content:
+                if path.is_file() and not _native_database(path) and path.read_bytes() == content:
                     continue
             except OSError:
                 pass
@@ -312,6 +375,9 @@ class FileSync:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path.write_bytes(content)
                 os.replace(tmp_path, path)
+                if _native_database(path):
+                    for suffix in SQLITE_SIDECARS:
+                        Path(str(path) + suffix).unlink(missing_ok=True)
             except OSError as exc:
                 try:
                     tmp_path.unlink()
@@ -340,7 +406,7 @@ class FileSync:
         local_root = self.local_dir.resolve()
         conflicts: List[str] = []
         for path in sorted(directory.rglob("*")):
-            if not path.is_file() or path.is_symlink():
+            if not path.is_file() or path.is_symlink() or _database_sidecar(path):
                 continue
             try:
                 rel = path.resolve().relative_to(local_root).as_posix()
@@ -375,6 +441,8 @@ class FileSync:
                 if not isinstance(entry, dict):
                     continue
                 path = base / rel
+                if _database_sidecar(path):
+                    continue
                 if not path.is_file():
                     unpushed.append(
                         {"root": root, "path": rel, "status": "deleted"}
@@ -404,6 +472,11 @@ class FileSync:
         # last pushed manifest are captured here and restored afterwards.
         root_key = self._root_key(local_dir)
         protected = self._protected_files(root_key, local_dir)
+        # Startup restore runs before the SDK opens history. Preserve every
+        # retained WAL's committed state as a standalone DB before mirroring.
+        for path in local_dir.rglob("*"):
+            if path.is_file() and _native_database(path) and any(Path(str(path) + suffix).exists() for suffix in SQLITE_SIDECARS):
+                protected[path.relative_to(local_dir).as_posix()] = _file_bytes(path)
         if protected:
             # The old implementation captured dirty files in memory, started
             # the destructive mirror, and only restored in ``finally``.  If
@@ -435,6 +508,8 @@ class FileSync:
         # fallback for an mc implementation that ignores excludes; it must not
         # be the only thing standing between a disk-full pull and data loss.
         exclude_args: List[str] = ["--exclude", "credentials/**"]
+        for suffix in SQLITE_SIDECARS:
+            exclude_args.extend(("--exclude", ".qwenpaw/workspaces/**/*" + suffix))
         for rel in sorted(protected):
             exclude_args.extend(("--exclude", rel))
         try:
@@ -504,7 +579,7 @@ class FileSync:
         pushed = []
         local_root = self.local_dir.resolve()
         for path in paths:
-            if path.is_symlink() or not path.is_file():
+            if path.is_symlink() or not path.is_file() or _database_sidecar(path):
                 continue
             try:
                 rel = path.resolve().relative_to(local_root)
@@ -516,7 +591,7 @@ class FileSync:
                 # #1391: snapshot the bytes before any compare or upload;
                 # the baseline is derived from this content, never from a
                 # re-read at record time.
-                data = path.read_bytes()
+                data = _file_bytes(path)
                 local_sha = hashlib.sha256(data).hexdigest()
                 remote = self._cat_bytes(key)
                 if remote == data:
@@ -535,7 +610,7 @@ class FileSync:
                 # change does not close.
                 local_sha = _sha256_file(path)
             try:
-                self._mc("cp", str(path), self._object_path(key), check=True)
+                self._upload_file(path, self._object_path(key), data)
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"persist migrated state failed: {_mc_error_message(exc)}") from None
             if data is not None:
@@ -580,13 +655,22 @@ class FileSync:
             # after the mirror (a write landing in the mirror window would
             # otherwise be recorded as pushed).
             snapshots: List[tuple[str, str]] = []
+            databases: List[Path] = []
+            database_excludes: List[str] = []
             for path in sorted(directory.rglob("*")):
                 if not path.is_file() or path.is_symlink():
                     continue
                 rel_to_dir = path.relative_to(directory).as_posix()
+                if _native_database(path):
+                    databases.append(path)
+                    database_excludes.append(rel_to_dir)
+                    continue
+                if _database_sidecar(path):
+                    database_excludes.append(rel_to_dir)
+                    continue
                 snapshots.append((rel_to_dir, _sha256_file(path)))
             extra_args: List[str] = []
-            for conflict in conflicts:
+            for conflict in [*conflicts, *database_excludes]:
                 extra_args.extend(["--exclude", conflict])
             try:
                 self._mc(
@@ -618,6 +702,7 @@ class FileSync:
                     f"{rel.as_posix()}/{rel_to_dir}",
                     sha256,
                 )
+            self.push_paths(path for path in databases if path.relative_to(directory).as_posix() not in conflict_set)
             mirrored.append(rel.as_posix())
         return mirrored
 
@@ -727,7 +812,7 @@ class FileSync:
             state = self._load_sync_state()
             tracked = (state.get("roots") or {}).get("worker") or {}
             for path in sorted(local_dir.rglob("*")):
-                if not path.is_file() or path.is_symlink():
+                if not path.is_file() or path.is_symlink() or _database_sidecar(path):
                     continue
                 try:
                     rel_path = path.relative_to(local_dir)
@@ -749,7 +834,7 @@ class FileSync:
                         # Snapshot the bytes before any compare or upload;
                         # the baseline is derived from this content, never
                         # from a re-read at record time.
-                        data = path.read_bytes()
+                        data = _file_bytes(path, timeout=call_timeout)
                         local_sha = hashlib.sha256(data).hexdigest()
                     else:
                         # Large file: no remote download for the compare,
@@ -788,10 +873,7 @@ class FileSync:
                     call_timeout = storage_timeout(rel)
                     if deadline is not None and call_timeout is None:
                         break
-                    self._mc(
-                        "cp", str(path), self._object_path(key),
-                        check=True, timeout=call_timeout,
-                    )
+                    self._upload_file(path, self._object_path(key), data, timeout=call_timeout)
                     if data is not None:
                         call_timeout = storage_timeout(rel)
                         if deadline is not None and call_timeout is None:
@@ -857,7 +939,7 @@ class FileSync:
         for path in local_dir.rglob("*"):
             if deadline is not None and time.monotonic() >= deadline:
                 break
-            if not path.is_file() or path.is_symlink():
+            if not path.is_file() or path.is_symlink() or _database_sidecar(path):
                 continue
             try:
                 rel_path = path.relative_to(local_dir)
@@ -923,11 +1005,15 @@ def _push_local_locked(sync: FileSync, since: float = 0) -> List[str]:
 
     sync.ensure_alias()
     for path in local_dir.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or _database_sidecar(path):
             continue
         try:
             stat = path.stat()
-            if stat.st_mtime <= since:
+            modified = stat.st_mtime
+            if _native_database(path):
+                modified = max([modified, *(Path(str(path) + suffix).stat().st_mtime
+                                            for suffix in SQLITE_SIDECARS if Path(str(path) + suffix).exists())])
+            if modified <= since:
                 continue
         except OSError:
             continue
@@ -943,7 +1029,7 @@ def _push_local_locked(sync: FileSync, since: float = 0) -> List[str]:
                 # #1391: snapshot the bytes before any compare or upload;
                 # the baseline is derived from this content, never from a
                 # re-read at record time.
-                data = path.read_bytes()
+                data = _file_bytes(path)
                 local_sha = hashlib.sha256(data).hexdigest()
                 remote = sync._cat_bytes(key)
                 if remote == data:
@@ -959,7 +1045,7 @@ def _push_local_locked(sync: FileSync, since: float = 0) -> List[str]:
                 # (a write landing during the upload is a known window
                 # this change does not close).
                 local_sha = _sha256_file(path)
-            sync._mc("cp", str(path), sync._object_path(key), check=True)
+            sync._upload_file(path, sync._object_path(key), data)
             if data is not None:
                 # #1391: bind the baseline to what the remote actually holds
                 # after the upload; a failed or empty read-back falls back

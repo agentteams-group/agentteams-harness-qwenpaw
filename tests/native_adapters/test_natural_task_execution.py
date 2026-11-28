@@ -29,6 +29,7 @@ def execution():
     run = module.TaskExecution.__new__(module.TaskExecution)
     run.channel, run.recovery = channel, authority
     run.lock, run.admitted, run.native_active = asyncio.Lock(), set(), set()
+    run.failed_retries = set()
     run.matrix = SimpleNamespace(start=lambda: None)
     run.select_session = AsyncMock(return_value='actual-native-session')
     run.deliver = AsyncMock()
@@ -39,10 +40,12 @@ def execution():
 
 def test_recovered_native_metadata_binds_the_actual_sending_worker(execution):
     run, task, identity, authority, channel = execution
+    task['main_task_id'] = 'main-one'
     asyncio.run(run.recover())
     payload = channel.enqueue_recovered_task.call_args.args[0]
     assert payload['meta']['agent_matrix_user_id'] == '@worker:test'
     assert payload['meta']['task_execution'] == identity
+    assert payload['meta']['main_task_id'] == 'main-one'
 
 
 def test_completed_handoff_only_settles_the_same_native_owner(execution):
@@ -75,3 +78,76 @@ def test_silent_terminal_callback_requires_a_durable_result(execution):
     assert prepared == [('T', 'team', '')]
     run.deliver.assert_not_awaited()
     assert identity['checkpoint_digest'] == Recovery.digest(task['execution']['checkpoint'])
+
+
+def test_same_process_recovers_submitted_report_without_another_native_turn(execution):
+    run, task, identity, authority, channel = execution
+    task.update(status="completed", result_path="shared/tasks/T/result.md")
+    task["execution"]["state"] = "released"
+    run.admitted.add(("team", "T", 1))
+    def claim(*args):
+        task["execution"]["checkpoint"].update(delivery="pending", result={"key": "saved"})
+        return {"task": copy.deepcopy(task), "saved_result": "Authoritative report"}
+    authority.claim = claim
+    asyncio.run(run.recover())
+    run.deliver.assert_awaited_once()
+    assert run.deliver.call_args.args[-1] == "Authoritative report"
+    channel.enqueue_recovered_task.assert_not_awaited()
+
+
+def test_failed_transport_retries_once_per_verified_progress_checkpoint(execution):
+    from unittest.mock import Mock
+    run, task, identity, authority, channel = execution
+    authority.release_failed_turn = Mock(return_value=True)
+    asyncio.run(run.retry_failed(identity))
+    asyncio.run(run.retry_failed(identity))
+    authority.release_failed_turn.assert_called_once_with(identity)
+    task['execution']['checkpoint']['completed_steps'] = ['verified-tool']
+    asyncio.run(run.retry_failed(identity))
+    assert authority.release_failed_turn.call_count == 2
+
+
+def test_same_process_reclaims_released_failed_turn_without_an_at_message(execution):
+    run, task, identity, authority, channel = execution
+    task['execution']['state'] = 'released'
+    run.admitted.add(('team', 'T', 1))
+    def claim(*args):
+        task['execution'].update(state='active', generation=2)
+        return {'task': copy.deepcopy(task), 'spec': 'Continue verified progress'}
+    authority.claim = claim
+    asyncio.run(run.recover())
+    assert channel.enqueue_recovered_task.call_args.args[0]['meta']['task_execution']['generation'] == 2
+
+
+@pytest.mark.parametrize('failure,retry', [('transport', True), ('iterations', True), ('cancelled', False), ('business', False)])
+def test_only_transport_failure_requests_native_task_retry(failure, retry):
+    import httpx
+    from unittest.mock import Mock, patch
+    from agentteams_matrix.channel import AgentTeamsMatrixChannel, NativeIterationLimit
+    from qwenpaw.app.channels.base import BaseChannel
+    error = {'iterations': NativeIterationLimit('native stop'), 'transport': httpx.RemoteProtocolError('incomplete chunked read'),
+             'cancelled': asyncio.CancelledError(), 'business': RuntimeError('task failed')}[failure]
+    async def stream(self, payload):
+        yield None
+        raise error
+    run = SimpleNamespace(verify=Mock(), retry_failed=AsyncMock(), native_closed=Mock(),
+                          recovery=SimpleNamespace(interrupted=Mock()))
+    channel = AgentTeamsMatrixChannel.__new__(AgentTeamsMatrixChannel)
+    channel._task_execution, channel._session_receipts = run, None
+    async def consume():
+        async for _ in channel._stream_recovered_task({'meta': {'task_execution': {'task_id': 'T', 'team_id': 'team'}}}):
+            pass
+    with patch.object(BaseChannel, '_stream_with_tracker', stream), pytest.raises(type(error)):
+        asyncio.run(consume())
+    assert run.retry_failed.await_count == int(retry)
+    run.native_closed.assert_called_once()
+
+
+def test_iteration_stop_retry_is_bounded_even_when_read_receipts_grow(execution):
+    from unittest.mock import Mock
+    run, task, identity, authority, channel = execution
+    authority.release_failed_turn = Mock(return_value=True)
+    asyncio.run(run.retry_failed(identity, iteration_limit=True))
+    task['execution']['checkpoint']['completed_steps'] = ['another-read']
+    asyncio.run(run.retry_failed(identity, iteration_limit=True))
+    authority.release_failed_turn.assert_called_once_with(identity)
