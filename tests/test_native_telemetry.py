@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = Path(os.environ.get("AT_SOURCE", ROOT / ".deps/AgentTeams"))
+SOURCE = Path(os.environ.get("AGENTTEAMS_CORE_SOURCE", os.environ.get("AT_SOURCE", ROOT / ".deps/AgentTeams")))
 NATIVE = ROOT / "telemetry"
 sys.path.insert(0, str(SOURCE / "shared/lib"))
 sys.path.insert(0, str(SOURCE / "shared/lib/telemetry"))

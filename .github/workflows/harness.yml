@@ -29,7 +29,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/qwenpaw-bin"
           go build -o "$RUNNER_TEMP/qwenpaw-bin/agt" ./cmd/agt
           echo "$RUNNER_TEMP/qwenpaw-bin" >> "$GITHUB_PATH"
-      - run: python -m pip install -e . 'matrix-nio>=0.25,<0.27' 'pytest>=8.3,<10' 'pytest-asyncio>=0.23,<2' 'jsonschema>=4,<5'
+      - run: python -m pip install -e . 'matrix-nio>=0.25,<0.27' 'pytest>=8.3,<10' 'pytest-asyncio>=0.23,<2' 'jsonschema>=4,<5' -r requirements-test.txt
       - run: make test
       - run: for script in scripts/*.sh; do bash -n "$script"; done
   image:
